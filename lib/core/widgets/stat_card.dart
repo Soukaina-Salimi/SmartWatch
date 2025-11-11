@@ -7,13 +7,14 @@ class StatCard extends StatelessWidget {
   final String label;
   final String value;
   final VoidCallback? onPressed;
-
+  final String? subValue;
   const StatCard({
     Key? key,
     required this.icon,
     required this.label,
     required this.value,
     this.onPressed,
+    this.subValue,
   }) : super(key: key);
 
   @override
@@ -44,7 +45,21 @@ class StatCard extends StatelessWidget {
                   label,
                   style: TextStyle(fontSize: 12, color: Colors.black54),
                 ),
-                Text(value, style: TextStyle(fontWeight: FontWeight.bold)),
+                Text(
+                  value,
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Theme.of(context).primaryColor,
+                  ),
+                ),
+
+                // 💡 AFFICHAGE OPTIONNEL DU SUBVALUE (Description météo)
+                if (subValue != null)
+                  Text(
+                    subValue!,
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
               ],
             ),
           ],

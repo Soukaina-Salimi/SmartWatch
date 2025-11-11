@@ -1,9 +1,13 @@
 // FILE: lib/pages/settings/configuration_page.dart
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:smartwatch_v2/core/theme/app_theme.dart';
 import 'package:smartwatch_v2/main.dart';
 import 'package:smartwatch_v2/routing/app_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/widgets/custom_card.dart';
 import '../../data/providers/user_provider.dart';
 
@@ -23,6 +27,8 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
   // 2. Variables d'état pour le genre et l'insomnie
   String? _selectedGender;
   bool _hasInsomnia = false;
+  XFile? _profileImage;
+  String? _profileImageUrl;
 
   final List<String> _genders = ['Homme', 'Femme', 'Autre'];
 
@@ -34,6 +40,49 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
     _sleepdurationController.dispose();
 
     super.dispose();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUserConfiguration();
+  }
+
+  Future<void> _loadUserConfiguration() async {
+    final user = supabase.auth.currentUser;
+    if (user != null) {
+      final config = await supabase
+          .from('user_configurations')
+          .select()
+          .eq('user_id', user.id)
+          .maybeSingle();
+
+      if (config != null) {
+        setState(() {
+          _ageController.text = config['age']?.toString() ?? '';
+          _heightController.text = config['height_cm']?.toString() ?? '';
+          _weightController.text = config['weight_kg']?.toString() ?? '';
+          _sleepdurationController.text =
+              config['sleep_duration']?.toString() ?? '';
+          _selectedGender = config['gender'];
+          _hasInsomnia = config['has_insomnia'] ?? false;
+          _profileImageUrl = config['profile_image_url'];
+        });
+      }
+    }
+  }
+
+  Future<void> _pickImage() async {
+    final ImagePicker picker = ImagePicker();
+    final XFile? pickedImage = await picker.pickImage(
+      source: ImageSource.gallery,
+    );
+
+    if (pickedImage != null) {
+      setState(() {
+        _profileImage = pickedImage;
+      });
+    }
   }
 
   void _saveConfiguration() async {
@@ -59,7 +108,40 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
         );
         return;
       }
+      // Upload de l'image si sélectionnée
+      if (_profileImage != null) {
+        final user = supabase.auth.currentUser!;
 
+        try {
+          final filePath =
+              'profile-images/${user.id}/${DateTime.now().millisecondsSinceEpoch}.png';
+
+          // Upload du fichier
+          await supabase.storage
+              .from('profile-images')
+              .upload(
+                filePath,
+                File(_profileImage!.path),
+                fileOptions: const FileOptions(
+                  cacheControl: '3600',
+                  upsert: true,
+                ),
+              );
+
+          // Récupérer l'URL publique
+          _profileImageUrl = supabase.storage
+              .from('profile-images')
+              .getPublicUrl(filePath);
+        } catch (e) {
+          // Si une erreur survient
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Erreur upload image: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
       // 🔍 Vérifier si une configuration existe déjà pour cet utilisateur
       final existing = await supabase
           .from('user_configurations')
@@ -78,6 +160,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
               'weight_kg': configData['weight_kg'],
               'has_insomnia': configData['has_insomnia'],
               'sleep_duration': configData['sleep_duration'],
+              'profile_image_url': _profileImageUrl,
             })
             .eq('user_id', user.id);
       } else {
@@ -90,6 +173,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
           'weight_kg': configData['weight_kg'],
           'has_insomnia': configData['has_insomnia'],
           'sleep_duration': configData['sleep_duration'],
+          'profile_image_url': _profileImageUrl,
         });
       }
 
@@ -276,6 +360,26 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
             _buildInsomniaCheckbox(),
 
             const SizedBox(height: 40),
+            GestureDetector(
+              onTap: _pickImage,
+              child: CircleAvatar(
+                radius: 50,
+                backgroundImage: _profileImage != null
+                    ? FileImage(File(_profileImage!.path))
+                    : (_profileImageUrl != null
+                          ? NetworkImage(_profileImageUrl!)
+                          : AssetImage('assets/default_profile.png')
+                                as ImageProvider),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Center(
+              child: Text(
+                'Appuyez sur l\'image pour la changer',
+                style: TextStyle(color: Colors.grey.shade600),
+              ),
+            ),
+            const SizedBox(height: 40),
 
             // --- Bouton de Sauvegarde (Style Plein Rouge) ---
             ElevatedButton(
@@ -291,6 +395,49 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
               ),
               child: const Text(
                 'Sauvegarder la Configuration',
+                style: TextStyle(
+                  fontSize: 18,
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            const SizedBox(height: 40),
+
+            // --- Bouton de Déconnexion ---
+            ElevatedButton(
+              onPressed: () async {
+                try {
+                  // Déconnexion de Supabase
+                  await supabase.auth.signOut();
+
+                  // Redirection vers la page Welcome
+                  if (mounted) {
+                    Navigator.pushNamedAndRemoveUntil(
+                      context,
+                      AppRouter.welcome,
+                      (route) => false,
+                    );
+                  }
+                } catch (e) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Erreur lors de la déconnexion : $e'),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                }
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.redAccent,
+                minimumSize: const Size(double.infinity, 55),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                elevation: 5,
+              ),
+              child: const Text(
+                'Se Déconnecter',
                 style: TextStyle(
                   fontSize: 18,
                   color: Colors.white,

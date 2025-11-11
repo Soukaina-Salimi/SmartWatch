@@ -2,6 +2,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:provider/provider.dart';
 import 'core/theme/app_theme.dart';
 import 'data/providers/user_provider.dart';
@@ -10,19 +11,19 @@ import 'routing/app_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:provider/provider.dart';
 
-// Clés Supabase (utilisées pour la connexion et l'accès global)
-const supabaseUrl = 'https://vcuzvdpymabweiyaitny.supabase.co';
-const supabaseAnonKey =
-    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjdXp2ZHB5bWFid2VpeWFpdG55Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE4NDk0MDcsImV4cCI6MjA3NzQyNTQwN30.FSCWmYsuDUUNnmy-8FCbQSRtrB67t4ju0STCF8_xjBc';
-
 // Global accessor pour Supabase
 final supabase = Supabase.instance.client;
 
 Future<void> main() async {
+  // 1. Charger le fichier .env
+  await dotenv.load(fileName: ".env");
   WidgetsFlutterBinding.ensureInitialized();
 
   // 1. Initialiser Supabase
-  await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+  await Supabase.initialize(
+    url: dotenv.env['SUPABASE_URL']!,
+    anonKey: dotenv.env['SUPABASE_ANON_KEY']!,
+  );
 
   runApp(
     MultiProvider(

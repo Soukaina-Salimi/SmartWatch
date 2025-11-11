@@ -1,4 +1,3 @@
-// FILE: lib/pages/dashboard/dashboard_page.dart
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:smartwatch_v2/routing/app_router.dart';
@@ -7,9 +6,45 @@ import '../../core/widgets/custom_card.dart';
 import '../../core/widgets/stat_card.dart';
 import '../../core/widgets/chart_widget.dart';
 import '../../data/providers/health_provider.dart';
-import '../../data/providers/user_provider.dart';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:geolocator/geolocator.dart';
+
+// Constante pour le nom de l'Edge Function
+const String _vitaminDFunctionName =
+    'vitamin_d_estimator'; // Renommé pour clarté
+
+// Service isolé pour les appels à l'Edge Function
+class HealthIndicatorService {
+  final SupabaseClient _supabase = Supabase.instance.client;
+
+  Future<Map<String, dynamic>?> calculateDailyVitaminD(String userId) async {
+    try {
+      final response = await _supabase.functions.invoke(
+        _vitaminDFunctionName,
+        body: {'user_id': userId},
+      );
+      print('Réponse complète VitD: ${response.data}');
+
+      if (response.status == 200) {
+        final result = response.data;
+        print('Score Vitamine D reçu : ${result['vitamin_d_score']}');
+        return result;
+      } else {
+        print('Erreur Edge Function Vitamine D (Statut: ${response.status})');
+        print('Corps de l\'erreur: ${response.data}');
+        // Retourne une structure pour indiquer l'erreur ou l'absence de données
+        return {
+          'error': response.data['error'] ?? 'Unknown error',
+          'vitamin_d_score': 0,
+        };
+      }
+    } catch (e) {
+      print('Erreur générale lors de l\'appel de l\'Edge Function: $e');
+      return null;
+    }
+  }
+}
 
 class DashboardPage extends StatefulWidget {
   @override
@@ -17,14 +52,19 @@ class DashboardPage extends StatefulWidget {
 }
 
 class _DashboardPageState extends State<DashboardPage> {
+  // --- NOUVELLE VARIABLE D'ÉTAT ---
+  String _vitaminDScore = '--'; // Affichera le score ou '--' en attendant
+  String? _userAvatarUrl;
+  // ... (autres variables d'état existantes)
   int _currentIndex = 0;
   final _formKey = GlobalKey<FormState>();
   final _formKeyCalories = GlobalKey<FormState>();
   bool _loading = false;
   String? _result;
   String? _resultCalories;
-
-  // Champs du formulaire
+  String _weatherDescription = 'Chargement...';
+  String _temperature = '--';
+  IconData _weatherIcon = Icons.cloud_off;
   final _genderController = TextEditingController();
   final _ageController = TextEditingController();
   final _occupationController = TextEditingController();
@@ -40,6 +80,77 @@ class _DashboardPageState extends State<DashboardPage> {
   final _weightController = TextEditingController();
   final _durationController = TextEditingController();
   final _bodyTempController = TextEditingController();
+
+  // --- NOUVELLE FONCTION DE CHARGEMENT ---
+  Future<void> _loadVitaminDScore() async {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+
+    if (userId == null) {
+      setState(() {
+        _vitaminDScore = 'N/A';
+      });
+      return;
+    }
+
+    final service = HealthIndicatorService();
+    final result = await service.calculateDailyVitaminD(userId);
+
+    if (mounted) {
+      // Vérifie si le widget est toujours monté
+      setState(() {
+        if (result != null && result.containsKey('vitamin_d_score')) {
+          _vitaminDScore = result['vitamin_d_score'].toString();
+        } else {
+          // Affiche N/A si une erreur ou absence de données
+          _vitaminDScore = 'N/A';
+        }
+      });
+    }
+  }
+
+  // 📸 NOUVELLE FONCTION : Charger l'URL de l'avatar
+  // 📸 FONCTION CORRIGÉE : Charger l'URL de l'avatar depuis userMetadata
+  // 📸 NOUVELLE FONCTION : Charger l'URL de l'avatar depuis la table 'user_configurations'
+  Future<void> _loadUserAvatarFromDatabase() async {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+
+    if (userId == null) {
+      setState(() {
+        _userAvatarUrl = null;
+      });
+      return;
+    }
+
+    try {
+      // 1. Requête la table 'user_configurations' pour l'utilisateur actuel
+      final response = await Supabase.instance.client
+          .from('user_configurations')
+          .select(
+            'profile_image_url',
+          ) // Sélectionne uniquement la colonne de l'image
+          .eq('user_id', userId) // Filtre par l'ID de l'utilisateur
+          .single(); // N'attend qu'un seul résultat (le profil utilisateur)
+
+      // 2. Vérifie et extrait l'URL
+      final String? url = response['profile_image_url'] as String?;
+
+      if (mounted) {
+        setState(() {
+          _userAvatarUrl = (url?.isNotEmpty == true) ? url : null;
+          print('DEBUG: URL Avatar depuis DB : $_userAvatarUrl');
+        });
+      }
+    } catch (e) {
+      print('ERREUR lors du chargement de l\'avatar depuis la DB: $e');
+      if (mounted) {
+        setState(() {
+          _userAvatarUrl = null;
+        });
+      }
+    }
+  }
+  // --- (Fonctions _predictStress, _predictCalories, getCurrentLocation, getWeather, _loadWeatherData, _mapWeatherCode inchangées) ---
+
   Future<void> _predictStress(String userId) async {
     setState(() {
       _loading = true;
@@ -134,8 +245,208 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
+  // MODIFIER CETTE FONCTION DANS VOTRE CODE
+  Future<Position?> getCurrentLocation() async {
+    try {
+      // 💡 AJOUT DU TRY/CATCH DANS CETTE FONCTION 💡
+      bool serviceEnabled;
+      LocationPermission permission;
+
+      // Teste si les services de localisation sont activés
+      serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        print("DEBUG: Geolocator Service Désactivé.");
+        return null;
+      }
+
+      // Demande la permission
+      permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          print("DEBUG: Permission refusée par l'utilisateur.");
+          return null;
+        }
+      }
+
+      // Obtient la position actuelle AVEC TIMEOUT
+      return await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.low,
+        timeLimit: const Duration(seconds: 10),
+      );
+    } catch (e, stacktrace) {
+      // 💡 Ce catch devrait afficher la VRAIE erreur si le plugin bloque 💡
+      print('ERREUR NATALE DANS getCurrentLocation: $e');
+      print('STACKTRACE DANS getCurrentLocation: $stacktrace');
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>?> getWeather(Position position) async {
+    final lat = position.latitude;
+    final lon = position.longitude;
+
+    // Construire l'URL de l'API
+    final url = Uri.https('api.open-meteo.com', '/v1/forecast', {
+      'latitude': lat.toString(),
+      'longitude': lon.toString(),
+      'current': 'temperature_2m,weather_code',
+      'forecast_hours': '1', // Juste pour l'actuel et une heure
+      'timezone': 'auto',
+    });
+    print('URL Météo: $url');
+    final response = await http.get(url);
+
+    if (response.statusCode == 200) {
+      // Succès ! Décoder la réponse JSON
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } else {
+      // Échec de la requête
+      print('Erreur API Open-Meteo: ${response.statusCode}');
+      return null;
+    }
+  }
+
+  void displayWeather() async {
+    final position = await getCurrentLocation();
+    if (position == null) {
+      print("Impossible d'obtenir la localisation.");
+      return;
+    }
+
+    final weatherData = await getWeather(position);
+
+    if (weatherData != null) {
+      // Exemple d'extraction de la température actuelle
+      final currentTemperature = weatherData['current']['temperature_2m'];
+      final weatherCode = weatherData['current']['weather_code'];
+
+      print('Température actuelle: $currentTemperature °C');
+      print('Code Météo (à interpréter): $weatherCode');
+
+      // Mettre à jour l'interface utilisateur de votre smartwatch avec ces valeurs
+    }
+  }
+
+  // NOUVELLE FONCTION MODIFIÉE : _loadWeatherData
+  void _loadWeatherData() async {
+    print("DEBUG: 1. Début de _loadWeatherData");
+
+    try {
+      // 💡 Le bloc TRY doit commencer ici 💡
+
+      // 1. Appel de la localisation
+      final position = await getCurrentLocation();
+
+      if (position == null) {
+        print(
+          "DEBUG: 2. Localisation est NULL (Problème de permission ou GPS)",
+        );
+        setState(() {
+          _weatherDescription = 'Localisation désactivée';
+          _weatherIcon = Icons.location_off;
+        });
+        return;
+      }
+
+      print("DEBUG: 3. Localisation obtenue: Lat ${position.latitude}");
+
+      // 2. Appel de l'API Météo
+      final weatherData = await getWeather(position);
+
+      if (weatherData != null) {
+        print("DEBUG: 4. Données météo reçues, mise à jour de l'UI.");
+
+        // On vérifie directement les types JSON pour être plus sûr
+        final currentMap = weatherData['current'] as Map<String, dynamic>?;
+
+        if (currentMap != null) {
+          final currentTemperature = currentMap['temperature_2m'] as double?;
+          final weatherCode = currentMap['weather_code'] as int?;
+
+          if (currentTemperature != null && weatherCode != null) {
+            final tempText = currentTemperature.toStringAsFixed(1);
+            final (description, icon) = _mapWeatherCode(weatherCode);
+
+            setState(() {
+              _temperature = '$tempText °C';
+              _weatherDescription = description;
+              _weatherIcon = icon;
+            });
+          } else {
+            print(
+              "DEBUG: 5a. Données 'temperature' ou 'code' manquantes dans le JSON.",
+            );
+            setState(() {
+              _weatherDescription = 'Données incomplètes';
+              _weatherIcon = Icons.error_outline;
+            });
+          }
+        } else {
+          print("DEBUG: 5b. La clé 'current' est absente ou non formatée.");
+        }
+      } else {
+        print(
+          "DEBUG: 5c. getWeather a retourné NULL (Problème API/Status code)",
+        );
+        // Si getWeather retourne NULL, l'état initial des variables sera conservé jusqu'au prochain setState.
+        // Ici, nous n'avons rien à faire de plus, car nous voulons voir les prints.
+      }
+    } catch (e, stacktrace) {
+      // 💡 Le catch attrape les erreurs de Localisation, de HTTP ou de Parsing JSON 💡
+      print('ERREUR FATALE DANS _loadWeatherData: $e');
+      print('STACKTRACE: $stacktrace');
+      setState(() {
+        _weatherDescription = 'Erreur critique: $e';
+        _weatherIcon = Icons.warning;
+      });
+    }
+  }
+
+  // NOUVELLE FONCTION : Mapping des Codes WMO (très simplifiée)
+  (String, IconData) _mapWeatherCode(int code) {
+    if (code >= 0 && code <= 1) {
+      return ('Ensoleillé', Icons.wb_sunny);
+    } else if (code >= 2 && code <= 3) {
+      return ('Nuageux', Icons.cloud);
+    } else if (code >= 45 && code <= 48) {
+      return ('Brume/Brouillard', Icons.blur_on);
+    } else if (code >= 51 && code <= 67) {
+      return ('Pluie', Icons.umbrella);
+    } else if (code >= 71 && code <= 75) {
+      return ('Neige', Icons.ac_unit);
+    }
+    return ('Conditions inconnues', Icons.question_mark);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    // 💡 APPEL DE LA FONCTION MÉTÉO AU DÉMARRAGE 💡
+    _loadWeatherData();
+    print('DEBUG: Appel de _loadVitaminDScore()');
+
+    // ✅ NOUVEL APPEL : Chargement du score de Vitamine D
+    _loadVitaminDScore();
+
+    _loadUserAvatarFromDatabase();
+    ();
+  }
+
   @override
   Widget build(BuildContext context) {
+    final health = Provider.of<HealthProvider>(context);
+    final wellbeingScore =
+        (100 - (health.data.temperature * 10) + (health.data.heartBpm / 10))
+            .clamp(0, 100)
+            .toInt();
+
+    final scoreLabel = wellbeingScore > 80
+        ? "Excellent 😄"
+        : wellbeingScore > 60
+        ? "Bon 🙂"
+        : "Faible 😟";
+
     return Scaffold(
       body: _buildDashboardBody(context),
       bottomNavigationBar: BottomNavigationBar(
@@ -149,7 +460,8 @@ class _DashboardPageState extends State<DashboardPage> {
 
           switch (i) {
             case 0:
-              Navigator.pushNamed(context, AppRouter.dashboard);
+              // Correction: Navigator.pushNamed dans onTap pour l'index actuel n'est pas nécessaire
+              // Navigator.pushNamed(context, AppRouter.dashboard);
               break;
             case 1:
               Navigator.pushNamed(context, AppRouter.activity);
@@ -206,16 +518,29 @@ class _DashboardPageState extends State<DashboardPage> {
                 'Smartwatch Santé',
                 style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
               ),
+              // ... (dans _buildDashboardBody, à l'intérieur de la Row du HEADER)
               CircleAvatar(
-                backgroundColor: Theme.of(context).primaryColor,
-                child: Icon(Icons.person, color: Colors.white),
+                // Si _userAvatarUrl est non-null, on utilise NetworkImage
+                backgroundImage: _userAvatarUrl != null
+                    ? NetworkImage(_userAvatarUrl!) as ImageProvider<Object>?
+                    : null, // Sinon, pas d'image de fond
+                // Si NetworkImage est utilisé, le child (icône) n'est pas nécessaire
+                // On utilise un opérateur ternaire pour afficher l'icône seulement si l'URL est nulle
+                backgroundColor: _userAvatarUrl != null
+                    ? Colors.grey[300] // Fond clair si image de profil chargée
+                    : Theme.of(context).primaryColor,
+
+                child: _userAvatarUrl == null
+                    ? Icon(Icons.person, color: Colors.white)
+                    : null, // Pas d'enfant si l'image est chargée
               ),
+              // ...
             ],
           ),
 
           SizedBox(height: 16),
 
-          // 🌿 SECTION HERO : Score de bien-être
+          // 🌿 SECTION HERO : Score de bien-être (inchangé)
           CustomCard(
             child: Container(
               height: 200,
@@ -234,7 +559,6 @@ class _DashboardPageState extends State<DashboardPage> {
               child: Stack(
                 alignment: Alignment.center,
                 children: [
-                  // Cercle décoratif doux en fond
                   Positioned(
                     top: -30,
                     right: -30,
@@ -367,9 +691,43 @@ class _DashboardPageState extends State<DashboardPage> {
                     ),
                     SizedBox(width: 10),
                     Expanded(
+                      child: StatCard(
+                        icon: _weatherIcon, // Utilisation de l'icône d'état
+                        label: 'Météo Actuelle',
+                        value:
+                            _temperature, // Utilisation de la température d'état
+                        subValue:
+                            _weatherDescription, // Description dans le sous-texte
+                        onPressed: _loadWeatherData, // Bouton pour réactualiser
+                      ),
+                    ),
+                  ],
+                ),
+                SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: StatCard(
+                        icon: Icons
+                            .local_florist, // Icône plus pertinente pour la Vit D
+                        label: 'Vitamine D (Score)',
+                        // ✅ UTILISATION DE LA VARIABLE D'ÉTAT MISE À JOUR
+                        value: '$_vitaminDScore / 100',
+                        // ✅ On utilise la nouvelle fonction de rechargement comme action
+                        onPressed: _loadVitaminDScore,
+                      ),
+                    ),
+                    SizedBox(width: 10),
+                    // Espace vide ou autre carte ici
+                  ],
+                ),
+
+                Row(
+                  children: [
+                    Expanded(
                       child: ElevatedButton(
                         onPressed: () => health.randomUpdate(),
-                        child: Text('Actualiser'),
+                        child: Text('Actualiser Santé (Local)'),
                       ),
                     ),
                   ],
@@ -380,8 +738,7 @@ class _DashboardPageState extends State<DashboardPage> {
 
           SizedBox(height: 16),
 
-          // ANALYSE IA
-          // 🌿 SECTION ANALYSE IA EXISTANTE
+          // ANALYSE IA (stress, calories - inchangée)
           CustomCard(
             child: Column(
               children: [
@@ -583,7 +940,7 @@ class _DashboardPageState extends State<DashboardPage> {
           ),
           SizedBox(height: 16),
 
-          // GRAPHIQUE CARDIAQUE
+          // GRAPHIQUE CARDIAQUE (inchangé)
           CustomCard(
             child: Column(
               children: [
@@ -637,6 +994,9 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  // Fonction désormais inutilisée dans ce fichier après les corrections
+  // void _onCalculateTap() async { /* ... */ }
+
   @override
   void dispose() {
     _genderController.dispose();
@@ -650,6 +1010,10 @@ class _DashboardPageState extends State<DashboardPage> {
     _heartRateController.dispose();
     _stepsController.dispose();
     _sleepDisorderController.dispose();
+    _heightController.dispose();
+    _weightController.dispose();
+    _durationController.dispose();
+    _bodyTempController.dispose();
     super.dispose();
   }
 }
