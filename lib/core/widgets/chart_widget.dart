@@ -9,11 +9,11 @@ class ChartWidget extends StatelessWidget {
   final bool curved;
 
   const ChartWidget({
-    Key? key,
+    super.key,
     required this.spots,
     this.height = 120,
     this.curved = true,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {

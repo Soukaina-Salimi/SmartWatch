@@ -1,14 +1,319 @@
+import 'dart:async';
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart';
 import 'package:provider/provider.dart';
+import 'package:smartwatch_v2/main.dart';
 import 'package:smartwatch_v2/routing/app_router.dart';
+import 'package:smartwatch_v2/services/data_sync_service.dart';
+import 'package:smartwatch_v2/services/notification_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/widgets/custom_card.dart';
 import '../../core/widgets/stat_card.dart';
-import '../../core/widgets/chart_widget.dart';
 import '../../data/providers/health_provider.dart';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
+import 'dart:math';
+import 'package:smartwatch_v2/data/models/user_metric.dart';
+import 'package:smartwatch_v2/data/models/user_configuration.dart';
+
+final StreamController<Map<String, dynamic>> chartStream =
+    StreamController.broadcast();
+
+class RealTimeChart extends StatefulWidget {
+  @override
+  _RealTimeChartState createState() => _RealTimeChartState();
+}
+
+class _RealTimeChartState extends State<RealTimeChart> {
+  final List<FlSpot> bpmData = [];
+  int xValue = 0;
+  StreamSubscription? _chartSubscription; // AJOUT
+
+  @override
+  void initState() {
+    super.initState();
+    _chartSubscription = chartStream.stream.listen((data) {
+      // MODIFICATION
+      if (mounted) {
+        // AJOUT : vérifier si le widget est toujours monté
+        setState(() {
+          bpmData.add(
+            FlSpot(xValue.toDouble(), (data['bpm'] as int).toDouble()),
+          );
+          xValue++;
+          if (bpmData.length > 50) {
+            bpmData.removeAt(0);
+          }
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _chartSubscription?.cancel(); // AJOUT : annuler la subscription
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LineChart(
+      LineChartData(
+        minY: 50,
+        maxY: 120,
+        lineBarsData: [
+          LineChartBarData(spots: bpmData, isCurved: true, color: Colors.red),
+        ],
+      ),
+    );
+  }
+}
+
+void startSimulatedData(DataSyncService service) {
+  Timer.periodic(Duration(seconds: 5), (_) async {
+    final data = service.generateTestData(); // Génère des données simulées
+    chartStream.add(data); // Envoie au chart
+    print("Nouvelle donnée simulée : $data");
+  });
+}
+
+final supabase = Supabase.instance.client;
+
+/// ⚡ Calcule le nombre approximatif de pas à partir des données d'accélération
+int calculateSteps(List<UserMetric> metrics) {
+  int steps = 0;
+  for (var m in metrics) {
+    // Simple estimation: chaque "pic" d'accélération compte comme un pas
+    double magnitude = sqrt(
+      pow(m.accelX, 2) + pow(m.accelY, 2) + pow(m.accelZ - 1.0, 2),
+    );
+    if (magnitude > 0.2) steps += 1; // seuil à ajuster selon capteur
+  }
+  return steps;
+}
+
+/// ⚡ Calcule la qualité du sommeil (0-100) approximativement
+double calculateSleepQuality(List<UserMetric> metrics) {
+  if (metrics.isEmpty) return 50.0; // valeur par défaut
+
+  double motionPenalty = 0.0;
+  double bpmPenalty = 0.0;
+
+  for (var m in metrics) {
+    // motion "STATIONARY" = pas de pénalité
+    if (m.motion != null && m.motion?.toUpperCase() != 'STATIONARY')
+      motionPenalty += 1.0;
+
+    // BPM élevé la nuit = moins bonne qualité
+    if (m.bpm != null && m.bpm! > 80) bpmPenalty += (m.bpm! - 80) / 100;
+  }
+
+  double quality =
+      100.0 - min(50.0, motionPenalty) - min(50.0, bpmPenalty * 50);
+  return quality.clamp(0.0, 100.0);
+}
+
+/// ⚡ Calcule le niveau d'activité physique
+double calculatePhysicalActivity(List<UserMetric> metrics) {
+  if (metrics.isEmpty) return 1.0;
+
+  double activityScore = 0.0;
+  for (var m in metrics) {
+    double magnitude = sqrt(
+      pow(m.accelX, 2) + pow(m.accelY, 2) + pow(m.accelZ - 1.0, 2),
+    );
+    activityScore += magnitude;
+  }
+
+  // Normaliser sur le nombre d'échantillons pour obtenir un score moyen
+  double avgScore = activityScore / metrics.length;
+  return (avgScore * 5).clamp(0.5, 3.0); // score approximatif 0.5-3.0
+}
+
+/// ⚡ Estimation de la pression artérielle à partir du BPM et du BMI
+double estimateBloodPressure(
+  UserConfiguration config,
+  List<UserMetric> metrics,
+) {
+  if (metrics.isEmpty) return 120.0;
+
+  double avgBpm =
+      metrics.map((m) => m.bpm ?? 70).reduce((a, b) => a + b) / metrics.length;
+
+  // Approximation simple : systolic = 110 + 0.5*BPM + 0.1*BMI
+  double bmi = config.weightKg / pow(config.heightCm / 100, 2);
+  double systolic = 110 + 0.5 * avgBpm + 0.1 * bmi;
+  return systolic.clamp(90.0, 160.0); // bornes réalistes
+}
+
+class StressPredictionService {
+  Timer? _timer;
+  Future<Map<String, dynamic>?> sendStressPrediction() async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+
+    if (user == null) {
+      print("Utilisateur non connecté");
+      return null;
+    }
+
+    final userId = user.id;
+
+    // 1️⃣ Charger la config
+    final configMap = await supabase
+        .from('user_configurations')
+        .select()
+        .eq('user_id', userId)
+        .maybeSingle();
+
+    if (configMap == null) {
+      print("Aucune configuration trouvée pour l'utilisateur");
+      return null;
+    }
+
+    final config = UserConfiguration.fromMap(configMap);
+    final gender = config.gender == 'Homme'
+        ? 1
+        : config.gender == 'Femme'
+        ? 2
+        : 0;
+
+    // 2️⃣ Charger les metrics récentes
+    final metricsData = await supabase
+        .from('user_metrics')
+        .select()
+        .eq('user_id', userId)
+        .order('ts', ascending: false)
+        .limit(50);
+
+    final metricsList = (metricsData as List<dynamic>)
+        .map((m) => UserMetric.fromMap(m))
+        .toList();
+
+    // 3️⃣ Calculs
+    final dailySteps = calculateSteps(metricsList);
+    final sleepQuality = calculateSleepQuality(metricsList);
+    final physicalActivity = calculatePhysicalActivity(metricsList);
+    final bloodPressure = estimateBloodPressure(config, metricsList);
+
+    final heartRate = metricsList.isNotEmpty
+        ? metricsList.map((m) => m.bpm ?? 70).reduce((a, b) => a + b) /
+              metricsList.length
+        : 70.0;
+
+    final sleepDuration = config.sleepDuration;
+    final bmi = config.weightKg / pow(config.heightCm / 100, 2);
+
+    // 4️⃣ Appel Edge Function
+    try {
+      final response = await supabase.functions.invoke(
+        'prediction',
+        body: {
+          'user_id': userId,
+          'Gender': gender,
+          'Age': config.age,
+          'Occupation': 0,
+          'Sleep_Duration': sleepDuration,
+          'Quality_of_Sleep': sleepQuality,
+          'Physical_Activity_Level': physicalActivity,
+          'BMI_Category': bmi,
+          'Blood_Pressure': bloodPressure,
+          'Heart_Rate': heartRate,
+          'Daily_Steps': dailySteps,
+          'Sleep_Disorder': config.hasInsomnia ? 1 : 0,
+        },
+      );
+
+      final predictionData = Map<String, dynamic>.from(response.data as Map);
+
+      print("Stress prédit : ${predictionData['stress_level']}");
+      return predictionData;
+    } catch (e) {
+      print("Erreur prédiction: $e");
+      return null;
+    }
+  }
+
+  void startAutoPrediction(Function(String) onUpdate) {
+    _timer = Timer.periodic(const Duration(minutes: 30), (_) async {
+      print("🕒 Envoi automatique de la prédiction...");
+
+      final result = await sendStressPrediction();
+      if (result != null) {
+        final stress = result['stress_level'].toString();
+        onUpdate(stress); // <-- On envoie la valeur au widget
+      }
+    });
+  }
+
+  void stopAutoPrediction() {
+    _timer?.cancel();
+  }
+}
+
+class StressNotificationService {
+  Timer? _checkTimer;
+  DateTime? _stressStartTime;
+  final StressPredictionService stressService;
+
+  // MODIFICATION: Pas besoin de contexte
+  StressNotificationService(this.stressService);
+
+  void _showStressNotification() {
+    showStressNotification();
+    _startBreathingExercise();
+  }
+
+  void startMonitoring() {
+    _checkTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+      final result = await stressService.sendStressPrediction();
+      if (result == null) return;
+
+      final stressLevel = result['stress_level']?.toString() ?? 'Low';
+
+      if (stressLevel == 'Extreme') {
+        if (_stressStartTime == null) {
+          _stressStartTime = DateTime.now();
+          print('🚨 Stress Extreme détecté - Début du compteur');
+        } else {
+          final duration = DateTime.now().difference(_stressStartTime!);
+          print('⏱️ Stress Extreme depuis: ${duration.inSeconds} secondes');
+          if (duration.inSeconds >= 20) {
+            _showStressNotification();
+            _stressStartTime = null;
+          }
+        }
+      } else {
+        if (_stressStartTime != null) {
+          print('✅ Stress retombé - Reset du compteur');
+          _stressStartTime = null;
+        }
+      }
+    });
+  }
+
+  void stopMonitoring() {
+    _checkTimer?.cancel();
+    _stressStartTime = null;
+  }
+
+  // MODIFICATION: Navigation globale sans contexte
+  void _startBreathingExercise() {
+    print("🧘‍♂️ Navigation vers l'exercice de respiration...");
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Utiliser la navigation globale via navigatorKey
+      if (navigatorKey.currentState != null) {
+        navigatorKey.currentState!.pushNamed(AppRouter.breathingExercise);
+        print('✅ Navigation réussie vers BreathingExercise');
+      } else {
+        print('❌ Navigator key non disponible');
+      }
+    });
+  }
+}
 
 // Constante pour le nom de l'Edge Function
 const String _vitaminDFunctionName =
@@ -47,6 +352,8 @@ class HealthIndicatorService {
 }
 
 class DashboardPage extends StatefulWidget {
+  const DashboardPage({super.key});
+
   @override
   _DashboardPageState createState() => _DashboardPageState();
 }
@@ -55,6 +362,29 @@ class _DashboardPageState extends State<DashboardPage> {
   // --- NOUVELLE VARIABLE D'ÉTAT ---
   String _vitaminDScore = '--'; // Affichera le score ou '--' en attendant
   String? _userAvatarUrl;
+  String? _stressLevel = '--';
+
+  final StressPredictionService _predictionService = StressPredictionService();
+  final StressNotificationService _stressNotificationService; // AJOUT
+  // AJOUT: Constructeur pour initialiser le service de notification
+  _DashboardPageState()
+    : _stressNotificationService = StressNotificationService(
+        StressPredictionService(),
+      );
+  Future<void> _loadStressPrediction() async {
+    setState(() => _loading = true);
+
+    final result = await _predictionService.sendStressPrediction();
+    if (result != null) {
+      setState(() {
+        _stressLevel = result['stress_level'].toString();
+        _loading = false;
+      });
+    } else {
+      setState(() => _loading = false);
+    }
+  }
+
   // ... (autres variables d'état existantes)
   int _currentIndex = 0;
   final _formKey = GlobalKey<FormState>();
@@ -108,9 +438,6 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
-  // 📸 NOUVELLE FONCTION : Charger l'URL de l'avatar
-  // 📸 FONCTION CORRIGÉE : Charger l'URL de l'avatar depuis userMetadata
-  // 📸 NOUVELLE FONCTION : Charger l'URL de l'avatar depuis la table 'user_configurations'
   Future<void> _loadUserAvatarFromDatabase() async {
     final userId = Supabase.instance.client.auth.currentUser?.id;
 
@@ -151,56 +478,6 @@ class _DashboardPageState extends State<DashboardPage> {
   }
   // --- (Fonctions _predictStress, _predictCalories, getCurrentLocation, getWeather, _loadWeatherData, _mapWeatherCode inchangées) ---
 
-  Future<void> _predictStress(String userId) async {
-    setState(() {
-      _loading = true;
-      _result = null;
-    });
-
-    try {
-      // 🔹 Appel à l’Edge Function
-      final predictionResponse = await Supabase.instance.client.functions
-          .invoke(
-            'prediction',
-            body: {
-              'user_id': userId,
-              'Gender': int.tryParse(_genderController.text) ?? 0,
-              'Age': int.tryParse(_ageController.text) ?? 0,
-              'Occupation': int.tryParse(_occupationController.text) ?? 0,
-              'Sleep_Duration':
-                  double.tryParse(_sleepDurationController.text) ?? 0.0,
-              'Quality_of_Sleep':
-                  double.tryParse(_sleepQualityController.text) ?? 0.0,
-              'Physical_Activity_Level':
-                  double.tryParse(_activityController.text) ?? 0.0,
-              'BMI_Category': double.tryParse(_bmiController.text) ?? 0.0,
-              'Blood_Pressure': double.tryParse(_bpController.text) ?? 0.0,
-              'Heart_Rate': double.tryParse(_heartRateController.text) ?? 0.0,
-              'Daily_Steps': double.tryParse(_stepsController.text) ?? 0.0,
-              'Sleep_Disorder':
-                  int.tryParse(_sleepDisorderController.text) ?? 0,
-            },
-          );
-
-      final predictionData = predictionResponse.data;
-      print("📩 Response from Edge Function: $predictionData");
-
-      final resultValue = predictionData['stress_level'] ?? 'Unknown';
-
-      setState(() {
-        _result = "Résultat : $resultValue";
-      });
-    } catch (e) {
-      setState(() {
-        _result = "Erreur : $e";
-      });
-    } finally {
-      setState(() {
-        _loading = false;
-      });
-    }
-  }
-
   Future<void> _predictCalories(String userId) async {
     setState(() {
       _loading = true;
@@ -208,26 +485,106 @@ class _DashboardPageState extends State<DashboardPage> {
     });
 
     try {
-      // 🔹 Appel à l’Edge Function Supabase (nom = prediction_calories_brunt)
-      final predictionResponse = await Supabase.instance.client.functions.invoke(
-        'predict_calories', // ⚠️ Le nom doit correspondre à celui du dossier de ta Edge Function
+      final supabase = Supabase.instance.client;
+
+      // 1️⃣ Extraction des données de configuration (inchangée)
+      final userConfigResponse = await supabase
+          .from('user_configurations')
+          .select()
+          .eq('user_id', userId)
+          .maybeSingle();
+
+      if (userConfigResponse == null) {
+        if (mounted) {
+          setState(() {
+            _resultCalories = "Erreur: Configuration utilisateur non trouvée.";
+            _loading = false;
+          });
+        }
+        return;
+      }
+
+      final int age = userConfigResponse['age'] ?? 0;
+      final double weight = (userConfigResponse['weightKg'] ?? 0).toDouble();
+      final double height = (userConfigResponse['heightCm'] ?? 0).toDouble();
+      final int gender = (userConfigResponse['gender'] == 'Homme'
+          ? 1
+          : userConfigResponse['gender'] == 'Femme'
+          ? 2
+          : 0);
+
+      // 2️⃣ Extraction des variables du formulaire (DOIT ÊTRE FAIT AVANT LA REQUÊTE)
+      final double duration = double.tryParse(_durationController.text) ?? 0.0;
+      final double bodyTemp = double.tryParse(_bodyTempController.text) ?? 0.0;
+
+      // --- CORRECTION DU BPM ---
+
+      // Calculer le timestamp de début : Maintenant moins la durée en minutes.
+      // La durée est en minutes, donc on la convertit en secondes
+      // Calculer l'heure de fin actuelle en UTC
+      final DateTime nowUtc = DateTime.now().toUtc(); // <-- Utilisez UTC
+
+      // Calculer le timestamp de début : Maintenant (UTC) moins la durée en minutes.
+      final DateTime startUtc = nowUtc.subtract(
+        Duration(minutes: duration.toInt()),
+      );
+      // Le timestamp dans Supabase est généralement au format ISO 8601 (String) ou epoch.
+      // Nous utiliserons le format String pour Supabase.
+      // Le filtre doit être une string ISO 8601 en UTC
+      final String timeFilter = startUtc.toIso8601String();
+      // 3️⃣ Récupérer les métriques BPM (heart rate) depuis user_metrics
+      final metricsData = await supabase
+          .from('user_metrics')
+          .select('bpm')
+          .eq('user_id', userId)
+          // 🚨 NOUVEAU FILTRE : Récupérer seulement les BPM enregistrés APRÈS timeFilter
+          .gte('ts', timeFilter)
+          .order('ts', ascending: false) // On conserve l'ordre
+          .limit(100); // Récupérer un nombre suffisant d'échantillons
+
+      // Vérification de la réponse et calcul de la moyenne
+      final List<int> bpmValues = (metricsData as List<dynamic>)
+          .map(
+            (e) => (e['bpm'] as int?) ?? 0,
+          ) // Convertir en int, gérer les nulls
+          .where((bpm) => bpm > 0) // Ignorer les valeurs nulles/zéros
+          .toList();
+
+      if (bpmValues.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _resultCalories =
+                "Erreur: Aucune donnée cardiaque trouvée pour cette période.";
+            _loading = false;
+          });
+        }
+        return;
+      }
+
+      // Calculer la moyenne
+      final double heartRate =
+          bpmValues.reduce((a, b) => a + b) / bpmValues.length;
+      // --- FIN CORRECTION DU BPM ---
+
+      // 4️⃣ Appel à l'Edge Function (inchangé)
+      final predictionResponse = await supabase.functions.invoke(
+        'predict_calories',
         body: {
           'user_id': userId,
-          'Gender': int.tryParse(_genderController.text) ?? 0,
-          'Age': int.tryParse(_ageController.text) ?? 0,
-          'Height': double.tryParse(_heightController.text) ?? 0.0,
-          'Weight': double.tryParse(_weightController.text) ?? 0.0,
-          'Duration': double.tryParse(_durationController.text) ?? 0.0,
-          'Heart_Rate': double.tryParse(_heartRateController.text) ?? 0.0,
-          'Body_Temp': double.tryParse(_bodyTempController.text) ?? 0.0,
+          'Gender': gender,
+          'Age': age,
+          'Height': height,
+          'Weight': weight,
+          'Duration': duration,
+          'Heart_Rate': heartRate, // ✅ Maintenant la moyenne
+          'Body_Temp': bodyTemp,
         },
       );
 
-      // 🔹 Vérification de la réponse
+      // ... (Reste de la gestion de la réponse)
       final predictionData = predictionResponse.data;
       print("📩 Response from Edge Function: $predictionData");
 
-      // 🔹 Récupération du champ 'calories_burned' (clé de sortie dans la Edge Function)
       final resultValue =
           predictionData?['calories_burned']?.toString() ?? 'Unknown';
 
@@ -236,7 +593,7 @@ class _DashboardPageState extends State<DashboardPage> {
       });
     } catch (e) {
       setState(() {
-        _resultCalories = "Erreur : $e";
+        _resultCalories = "Erreur critique de prédiction: $e";
       });
     } finally {
       setState(() {
@@ -419,18 +776,55 @@ class _DashboardPageState extends State<DashboardPage> {
     return ('Conditions inconnues', Icons.question_mark);
   }
 
+  late final StreamSubscription<AuthState> _authSubscription;
   @override
   void initState() {
     super.initState();
-    // 💡 APPEL DE LA FONCTION MÉTÉO AU DÉMARRAGE 💡
+    final service = DataSyncService(supabase: Supabase.instance.client);
+    startSimulatedData(service);
+    // 1. Charger les données qui ne dépendent pas du login actif (Météo, Avatar)
     _loadWeatherData();
-    print('DEBUG: Appel de _loadVitaminDScore()');
-
-    // ✅ NOUVEL APPEL : Chargement du score de Vitamine D
-    _loadVitaminDScore();
-
     _loadUserAvatarFromDatabase();
-    ();
+
+    // 2. Écouter les changements d'état d'authentification
+    // Ceci est la MEILLEURE PRATIQUE pour synchroniser l'UI avec l'état de la session.
+    _authSubscription = supabase.auth.onAuthStateChange.listen((data) {
+      final AuthChangeEvent event = data.event;
+
+      // Si l'événement est un LOGIN ou la RECUPERATION d'une session existante
+      if (event == AuthChangeEvent.signedIn ||
+          event == AuthChangeEvent.initialSession) {
+        print(
+          "AUTH CHANGE: User is Signed In/Initial Session Loaded. Démarrage des services.",
+        );
+
+        // Démarrer les services qui DÉPENDENT de l'ID utilisateur (stress, vit D)
+        _predictionService
+            .stopAutoPrediction(); // Arrêter l'ancien service au cas où
+        _loadStressPrediction();
+        _loadVitaminDScore();
+
+        _predictionService.startAutoPrediction((value) {
+          if (mounted) {
+            setState(() {
+              _stressLevel = value;
+            });
+          }
+        });
+        _stressNotificationService.startMonitoring();
+      } else if (event == AuthChangeEvent.signedOut) {
+        print("AUTH CHANGE: User Signed Out. Arrêt des services.");
+        _predictionService.stopAutoPrediction();
+        _stressNotificationService
+            .stopMonitoring(); // ✅ ARRÊTER LA SURVEILLANCE
+        if (mounted) {
+          setState(() {
+            _stressLevel = '--'; // Réinitialiser l'état
+            _vitaminDScore = '--';
+          });
+        }
+      }
+    });
   }
 
   @override
@@ -604,7 +998,7 @@ class _DashboardPageState extends State<DashboardPage> {
                       ),
                       SizedBox(height: 12),
                       Text(
-                        "$scoreLabel",
+                        scoreLabel,
                         style: TextStyle(color: Colors.white70, fontSize: 16),
                       ),
                       SizedBox(height: 16),
@@ -642,7 +1036,48 @@ class _DashboardPageState extends State<DashboardPage> {
           ),
 
           SizedBox(height: 24),
-
+          // Dans _buildDashboardBody, après la section "Score de bien-être"
+          CustomCard(
+            child: Padding(
+              padding: EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  Icon(
+                    _stressLevel == 'high' ? Icons.warning : Icons.psychology,
+                    color: _stressLevel == 'high'
+                        ? Colors.orange
+                        : Colors.green,
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Niveau de stress',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        Text(
+                          _stressLevel == 'high'
+                              ? 'Élevé - Surveillance active'
+                              : _stressLevel == 'medium'
+                              ? 'Modéré'
+                              : 'Normal',
+                          style: TextStyle(
+                            color: _stressLevel == 'high'
+                                ? Colors.orange
+                                : Colors.green,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (_stressLevel == 'high')
+                    Icon(Icons.notifications_active, color: Colors.orange),
+                ],
+              ),
+            ),
+          ),
           // TABLEAU DE BORD
           CustomCard(
             child: Column(
@@ -684,7 +1119,7 @@ class _DashboardPageState extends State<DashboardPage> {
                       child: StatCard(
                         icon: Icons.wb_sunny,
                         label: 'UV',
-                        value: '${health.data.uvIndex.toStringAsFixed(1)}',
+                        value: health.data.uvIndex.toStringAsFixed(1),
                         onPressed: () =>
                             Navigator.pushNamed(context, AppRouter.uv),
                       ),
@@ -773,63 +1208,10 @@ class _DashboardPageState extends State<DashboardPage> {
                   key: _formKey,
                   child: Column(
                     children: [
-                      _buildTextField(_genderController, 'Gender (0/1)'),
-                      _buildTextField(_ageController, 'Age'),
-                      _buildTextField(
-                        _occupationController,
-                        'Occupation (code)',
-                      ),
-                      _buildTextField(
-                        _sleepDurationController,
-                        'Sleep Duration (heures)',
-                      ),
-                      _buildTextField(
-                        _sleepQualityController,
-                        'Quality of Sleep (1–10)',
-                      ),
-                      _buildTextField(
-                        _activityController,
-                        'Physical Activity Level',
-                      ),
-                      _buildTextField(_bmiController, 'BMI Category'),
-                      _buildTextField(_bpController, 'Blood Pressure'),
-                      _buildTextField(_heartRateController, 'Heart Rate'),
-                      _buildTextField(_stepsController, 'Daily Steps'),
-                      _buildTextField(
-                        _sleepDisorderController,
-                        'Sleep Disorder (0/1)',
-                      ),
-
-                      SizedBox(height: 12),
-                      ElevatedButton(
-                        onPressed: _loading
-                            ? null
-                            : () {
-                                final user =
-                                    Supabase.instance.client.auth.currentUser;
-                                if (user != null) {
-                                  _predictStress(
-                                    user.id,
-                                  ); // On passe l'id réel de l'utilisateur connecté
-                                } else {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content: Text(
-                                        "Aucun utilisateur connecté",
-                                      ),
-                                    ),
-                                  );
-                                }
-                              },
-
-                        child: _loading
-                            ? CircularProgressIndicator(color: Colors.white)
-                            : Text("Prédire le stress"),
-                      ),
                       SizedBox(height: 16),
-                      if (_result != null)
+                      if (_stressLevel != '--')
                         Text(
-                          _result!,
+                          'Stress : $_stressLevel',
                           style: TextStyle(
                             fontWeight: FontWeight.bold,
                             fontSize: 16,
@@ -878,15 +1260,7 @@ class _DashboardPageState extends State<DashboardPage> {
                   key: _formKeyCalories,
                   child: Column(
                     children: [
-                      _buildTextField(
-                        _genderController,
-                        'Gender (0: Female, 1: Male)',
-                      ),
-                      _buildTextField(_ageController, 'Age'),
-                      _buildTextField(_heightController, 'Height (cm)'),
-                      _buildTextField(_weightController, 'Weight (kg)'),
                       _buildTextField(_durationController, 'Duration (min)'),
-                      _buildTextField(_heartRateController, 'Heart Rate (bpm)'),
                       _buildTextField(
                         _bodyTempController,
                         'Body Temperature (°C)',
@@ -958,7 +1332,10 @@ class _DashboardPageState extends State<DashboardPage> {
                   ],
                 ),
                 SizedBox(height: 8),
-                ChartWidget(spots: health.chartSpots, height: 140),
+                Container(
+                  height: 140,
+                  child: RealTimeChart(), // ← chart dynamique
+                ),
                 SizedBox(height: 8),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -999,6 +1376,8 @@ class _DashboardPageState extends State<DashboardPage> {
 
   @override
   void dispose() {
+    _authSubscription.cancel(); // 👈 TRÈS IMPORTANT : Annuler l'écoute
+    _predictionService.stopAutoPrediction();
     _genderController.dispose();
     _ageController.dispose();
     _occupationController.dispose();
@@ -1014,6 +1393,8 @@ class _DashboardPageState extends State<DashboardPage> {
     _weightController.dispose();
     _durationController.dispose();
     _bodyTempController.dispose();
+    chartStream.close();
+    _stressNotificationService.stopMonitoring();
     super.dispose();
   }
 }

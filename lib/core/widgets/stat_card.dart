@@ -9,13 +9,13 @@ class StatCard extends StatelessWidget {
   final VoidCallback? onPressed;
   final String? subValue;
   const StatCard({
-    Key? key,
+    super.key,
     required this.icon,
     required this.label,
     required this.value,
     this.onPressed,
     this.subValue,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {

@@ -3,15 +3,15 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:provider/provider.dart';
 import 'package:smartwatch_v2/core/theme/app_theme.dart';
 import 'package:smartwatch_v2/main.dart';
 import 'package:smartwatch_v2/routing/app_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../../core/widgets/custom_card.dart';
-import '../../data/providers/user_provider.dart';
+
 
 class ConfigurationPage extends StatefulWidget {
+  const ConfigurationPage({super.key});
+
   @override
   _ConfigurationPageState createState() => _ConfigurationPageState();
 }
@@ -273,7 +273,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
                   _hasInsomnia = newValue;
                 });
               },
-              activeColor: AppTheme.lightTheme.primaryColor,
+              activeThumbColor: AppTheme.lightTheme.primaryColor,
             ),
           ],
         ),

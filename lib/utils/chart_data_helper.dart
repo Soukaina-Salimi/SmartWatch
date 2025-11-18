@@ -1,7 +1,6 @@
 // FILE: lib/utils/chart_data_helper.dart
 // small helper wrapper in case you want to transform or fetch data later
 import 'package:fl_chart/fl_chart.dart';
-import 'mock_data.dart';
 
 class ChartDataHelper {
   static List<FlSpot> spotsFromMock() => ChartDataHelperInternal.spots();

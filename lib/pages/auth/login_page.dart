@@ -4,7 +4,6 @@ import 'package:smartwatch_v2/core/theme/app_theme.dart';
 import 'package:smartwatch_v2/main.dart';
 import 'package:smartwatch_v2/routing/app_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:flutter/scheduler.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -625,7 +624,7 @@ class _ParticlesBackground extends StatelessWidget {
         final delay = index * 0.1;
         final particleAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
           CurvedAnimation(
-            parent: this.animation,
+            parent: animation,
             curve: Interval(delay, 1.0, curve: Curves.easeInOut),
           ),
         );

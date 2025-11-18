@@ -6,6 +6,8 @@ import '../../data/providers/health_provider.dart';
 import '../../routing/app_router.dart';
 
 class HeartRatePage extends StatefulWidget {
+  const HeartRatePage({super.key});
+
   @override
   _HeartRatePageState createState() => _HeartRatePageState();
 }

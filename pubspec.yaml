@@ -40,16 +40,22 @@ dependencies:
   # Pour faire des requêtes HTTP
   http: ^1.1.0
   # Pour obtenir la position GPS de l'utilisateur
-  geolocator: ^10.1.0
+  geolocator: ^13.0.1
+  geolocator_android: ^4.4.0  
+  connectivity_plus: ^4.0.0
+  uuid: ^4.5.2
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   flutter_dotenv: ^6.0.0
-
+  path_provider: ^2.1.2 
+  json_annotation: ^4.8.1
+  flutter_local_notifications: ^19.0.0
 dev_dependencies:
   flutter_test:
     sdk: flutter
-
+  build_runner: ^2.4.8    # <-- Ajout
+  json_serializable: ^6.7.1 # <-- Ajout
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
   # activated in the `analysis_options.yaml` file located at the root of your
@@ -68,6 +74,8 @@ flutter:
   uses-material-design: true
   assets:
     - assets/images/
+    - assets/.env
+
 
   # To add assets to your application, add an assets section, like this:
   # assets:

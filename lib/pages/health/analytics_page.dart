@@ -6,6 +6,8 @@ import '../../data/providers/health_provider.dart';
 import '../../routing/app_router.dart';
 
 class AnalyticsPage extends StatefulWidget {
+  const AnalyticsPage({super.key});
+
   @override
   _AnalyticsPageState createState() => _AnalyticsPageState();
 }

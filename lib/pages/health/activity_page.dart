@@ -6,6 +6,8 @@ import '../../data/providers/health_provider.dart';
 import '../../routing/app_router.dart';
 
 class ActivityPage extends StatefulWidget {
+  const ActivityPage({super.key});
+
   @override
   _ActivityPageState createState() => _ActivityPageState();
 }

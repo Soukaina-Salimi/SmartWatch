@@ -1,30 +1,28 @@
 // FILE: lib/main.dart
 import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:provider/provider.dart';
+import 'package:smartwatch_v2/services/data_sync_service.dart';
+import 'package:smartwatch_v2/services/notification_service.dart';
 import 'core/theme/app_theme.dart';
 import 'data/providers/user_provider.dart';
 import 'data/providers/health_provider.dart';
 import 'routing/app_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:provider/provider.dart';
 
-// Global accessor pour Supabase
 final supabase = Supabase.instance.client;
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
-  // 1. Charger le fichier .env
-  await dotenv.load(fileName: ".env");
+  await dotenv.load(fileName: "assets/.env");
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1. Initialiser Supabase
   await Supabase.initialize(
     url: dotenv.env['SUPABASE_URL']!,
     anonKey: dotenv.env['SUPABASE_ANON_KEY']!,
   );
-
+  await initNotifications();
   runApp(
     MultiProvider(
       providers: [
@@ -38,21 +36,71 @@ Future<void> main() async {
 
 class MyApp extends StatelessWidget {
   final AppRouter _router = AppRouter();
+  final DataSyncService dataSyncService = DataSyncService(
+    supabase: Supabase.instance.client,
+  );
+
+  MyApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Smartwatch Santé',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
-      initialRoute: AppRouter.welcome,
+      home: AuthGate(dataSyncService: dataSyncService),
       onGenerateRoute: _router.onGenerateRoute,
+      navigatorKey: navigatorKey,
     );
   }
 }
 
-// Widget qui écoute l'état d'authentification de Supabase
+class AuthGate extends StatefulWidget {
+  final DataSyncService dataSyncService;
+
+  const AuthGate({super.key, required this.dataSyncService});
+
+  @override
+  _AuthGateState createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<AuthGate> {
+  @override
+  void initState() {
+    super.initState();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final session = Supabase.instance.client.auth.currentSession;
+
+      if (session != null) {
+        // Déjà connecté → dashboard
+        Navigator.pushReplacementNamed(context, AppRouter.dashboard);
+      } else {
+        // Pas de session → welcome
+        Navigator.pushReplacementNamed(context, AppRouter.welcome);
+      }
+
+      // Démarrer sync
+      widget.dataSyncService.startSendingTestData();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Écran vide très court (moins de 20 ms)
+    return const Scaffold(body: Center(child: CircularProgressIndicator()));
+  }
+}
+
 class AuthChecker extends StatefulWidget {
-  const AuthChecker({super.key});
+  final DataSyncService dataSyncService;
+  final Widget child;
+
+  const AuthChecker({
+    super.key,
+    required this.dataSyncService,
+    required this.child,
+  });
 
   @override
   State<AuthChecker> createState() => _AuthCheckerState();
@@ -65,31 +113,23 @@ class _AuthCheckerState extends State<AuthChecker> {
   void initState() {
     super.initState();
 
-    // Initialisation et écoute des changements d'état d'authentification
     _authStateSubscription = supabase.auth.onAuthStateChange.listen((data) {
-      if (mounted) {
-        // Redirige lors d'un changement d'état (login, logout, initial)
-        _redirect(data.session);
-      }
+      if (mounted) _redirect(data.session);
     });
 
-    // Vérification initiale pour assurer une navigation immédiate au lancement
-    final session = supabase.auth.currentSession;
-    _redirect(session);
+    _redirect(supabase.auth.currentSession);
+
+    // Démarre l'envoi des données test
+    widget.dataSyncService.startSendingTestData();
   }
 
-  // Fonction de redirection
   void _redirect(Session? session) {
     if (!mounted) return;
-
-    // Utilise un microtask pour s'assurer que la navigation se fait en toute sécurité
-    Future.microtask(() {
+    Future.microtask(() async {
       if (session != null) {
-        // Si connecté, aller au tableau de bord
-        Navigator.of(context).pushReplacementNamed('/dashboard');
+        Navigator.of(context).pushReplacementNamed(AppRouter.dashboard);
       } else {
-        // Si déconnecté, aller à la page de bienvenue
-        Navigator.of(context).pushReplacementNamed('/welcome');
+        Navigator.of(context).pushReplacementNamed(AppRouter.welcome);
       }
     });
   }
@@ -102,9 +142,6 @@ class _AuthCheckerState extends State<AuthChecker> {
 
   @override
   Widget build(BuildContext context) {
-    // Écran de chargement initial
-    return const Scaffold(
-      body: Center(child: CircularProgressIndicator(color: Colors.white)),
-    );
+    return widget.child;
   }
 }

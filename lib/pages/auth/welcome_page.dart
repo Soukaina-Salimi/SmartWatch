@@ -6,6 +6,8 @@ import '../../core/theme/app_theme.dart';
 import '../../routing/app_router.dart';
 
 class WelcomePage extends StatefulWidget {
+  const WelcomePage({super.key});
+
   @override
   _WelcomePageState createState() => _WelcomePageState();
 }

@@ -7,6 +7,8 @@ import '../../data/providers/health_provider.dart';
 import '../../routing/app_router.dart';
 
 class UVMonitoringPage extends StatefulWidget {
+  const UVMonitoringPage({super.key});
+
   @override
   _UVMonitoringPageState createState() => _UVMonitoringPageState();
 }
@@ -35,7 +37,7 @@ class _UVMonitoringPageState extends State<UVMonitoringPage> {
                     children: [
                       Text('UV', style: TextStyle(fontSize: 18)),
                       Text(
-                        '${health.data.uvIndex.toStringAsFixed(1)}',
+                        health.data.uvIndex.toStringAsFixed(1),
                         style: TextStyle(
                           fontWeight: FontWeight.bold,
                           fontSize: 22,

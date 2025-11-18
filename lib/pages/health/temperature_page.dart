@@ -7,6 +7,8 @@ import '../../data/providers/health_provider.dart';
 import '../../routing/app_router.dart';
 
 class TemperaturePage extends StatefulWidget {
+  const TemperaturePage({super.key});
+
   @override
   _TemperaturePageState createState() => _TemperaturePageState();
 }
