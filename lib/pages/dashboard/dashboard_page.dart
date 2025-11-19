@@ -1037,47 +1037,6 @@ class _DashboardPageState extends State<DashboardPage> {
 
           SizedBox(height: 24),
           // Dans _buildDashboardBody, après la section "Score de bien-être"
-          CustomCard(
-            child: Padding(
-              padding: EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  Icon(
-                    _stressLevel == 'high' ? Icons.warning : Icons.psychology,
-                    color: _stressLevel == 'high'
-                        ? Colors.orange
-                        : Colors.green,
-                  ),
-                  SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Niveau de stress',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        Text(
-                          _stressLevel == 'high'
-                              ? 'Élevé - Surveillance active'
-                              : _stressLevel == 'medium'
-                              ? 'Modéré'
-                              : 'Normal',
-                          style: TextStyle(
-                            color: _stressLevel == 'high'
-                                ? Colors.orange
-                                : Colors.green,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (_stressLevel == 'high')
-                    Icon(Icons.notifications_active, color: Colors.orange),
-                ],
-              ),
-            ),
-          ),
           // TABLEAU DE BORD
           CustomCard(
             child: Column(
@@ -1088,43 +1047,9 @@ class _DashboardPageState extends State<DashboardPage> {
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
                 SizedBox(height: 12),
+
                 Row(
                   children: [
-                    Expanded(
-                      child: StatCard(
-                        icon: Icons.favorite,
-                        label: 'Rythme cardiaque',
-                        value: '${health.data.heartBpm} BPM',
-                        onPressed: () =>
-                            Navigator.pushNamed(context, AppRouter.heart),
-                      ),
-                    ),
-                    SizedBox(width: 10),
-                    Expanded(
-                      child: StatCard(
-                        icon: Icons.thermostat,
-                        label: 'Température',
-                        value:
-                            '${health.data.temperature.toStringAsFixed(1)} °C',
-                        onPressed: () =>
-                            Navigator.pushNamed(context, AppRouter.temp),
-                      ),
-                    ),
-                  ],
-                ),
-                SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: StatCard(
-                        icon: Icons.wb_sunny,
-                        label: 'UV',
-                        value: health.data.uvIndex.toStringAsFixed(1),
-                        onPressed: () =>
-                            Navigator.pushNamed(context, AppRouter.uv),
-                      ),
-                    ),
-                    SizedBox(width: 10),
                     Expanded(
                       child: StatCard(
                         icon: _weatherIcon, // Utilisation de l'icône d'état
