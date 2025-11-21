@@ -1,0 +1,719 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include "MAX30105.h"
+#include "heartRate.h"
+#include <MPU6050.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <BLE2902.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
+
+// OLED Display Configuration
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// Button Configuration
+#define BUTTON_PIN 4
+volatile int displayMode = 0;
+const int MAX_DISPLAY_MODES = 3;
+volatile unsigned long lastButtonPress = 0;
+const unsigned long DEBOUNCE_DELAY = 500;
+
+// Sensor Objects
+MAX30105 particleSensor;
+MPU6050 mpu;
+
+// BLE Configuration
+BLEServer *pServer = NULL;
+BLECharacteristic *pTxCharacteristic = NULL;
+BLECharacteristic *pPpgRawCharacteristic = NULL;
+BLECharacteristic *pMotionRawCharacteristic = NULL;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+
+#define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_PPG_RAW "6E400004-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_MOTION_RAW "6E400005-B5A3-F393-E0A9-E50E24DCCA9E"
+
+// FreeRTOS Handles
+TaskHandle_t ppgTaskHandle;
+TaskHandle_t ppgRawTaskHandle;
+TaskHandle_t bleTaskHandle;
+TaskHandle_t motionTaskHandle;
+TaskHandle_t displayTaskHandle;
+TaskHandle_t serialTaskHandle;
+
+SemaphoreHandle_t xMutex;
+
+// Global Data Structure
+typedef struct {
+    volatile bool fingerDetected;
+    volatile long irValue;
+    volatile float heartRate;
+    volatile long interBeatInterval;
+    volatile float signalQuality;
+    volatile float accelX, accelY, accelZ;
+    volatile float gyroX, gyroY, gyroZ;
+    volatile float accelMagnitude;
+    char motionState[10];
+    volatile unsigned long systemTime;
+    volatile bool bleConnected;
+    volatile bool rtosRunning;
+} SystemData_t;
+
+SystemData_t systemData;
+
+// Button Interrupt Handler
+void IRAM_ATTR handleButtonPress() {
+    unsigned long currentTime = millis();
+    if (currentTime - lastButtonPress > DEBOUNCE_DELAY) {
+        displayMode = (displayMode + 1) % MAX_DISPLAY_MODES;
+        lastButtonPress = currentTime;
+        Serial.print("🔄 Display Mode Changed to: ");
+        Serial.println(displayMode);
+    }
+}
+
+// Custom min/max functions
+float customMin(float a, float b) {
+    return (a < b) ? a : b;
+}
+
+float customMax(float a, float b) {
+    return (a > b) ? a : b;
+}
+
+// BLE Callbacks
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+        deviceConnected = true;
+        systemData.bleConnected = true;
+        Serial.println("✅ Appareil Bluetooth connecté");
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+        deviceConnected = false;
+        systemData.bleConnected = false;
+        Serial.println("❌ Appareil Bluetooth déconnecté");
+        BLEDevice::startAdvertising();
+    }
+};
+
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+        String rxValue = pCharacteristic->getValue().c_str();
+        if (rxValue.length() > 0) {
+            Serial.print("📱 Received Value: ");
+            Serial.println(rxValue);
+        }
+    }
+};
+
+// Initialize Sensors
+bool initializeSensors() {
+    Serial.println("🔧 Initialisation des capteurs...");
+    
+    // Initialize I2C
+    Wire.begin();
+    Wire.setClock(400000);
+    
+    // Initialize MAX30102
+    Serial.println("🔧 Initialisation MAX30102...");
+    if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+        Serial.println("❌ MAX30102 non détecté - Vérifiez le câblage I2C");
+        return false;
+    }
+    
+    // MAX30102 setup
+    byte ledBrightness = 0x1F;
+    byte sampleAverage = 4;
+    byte ledMode = 2;
+    int sampleRate = 400;
+    int pulseWidth = 411;
+    int adcRange = 4096;
+    
+    particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
+    particleSensor.enableDIETEMPRDY();
+    
+    Serial.println("✅ MAX30102 initialisé");
+    
+    // Initialize MPU6050
+    mpu.initialize();
+    if (!mpu.testConnection()) {
+        Serial.println("❌ MPU6050 non détecté");
+        return false;
+    }
+    
+    // Calibrate MPU6050
+    Serial.println("🔧 Calibration MPU6050...");
+    mpu.CalibrateAccel(6);
+    mpu.CalibrateGyro(6);
+    Serial.println("✅ Calibration MPU6050 terminée");
+    
+    // Initialize OLED
+    if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+        Serial.println("❌ OLED non détecté");
+        return false;
+    }
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    display.setTextSize(1);
+    display.setCursor(0,0);
+    display.println("Health Monitor");
+    display.println("Initializing...");
+    display.display();
+    Serial.println("✅ OLED initialisé");
+    
+    return true;
+}
+
+// Initialize Bluetooth
+void initializeBluetooth() {
+    Serial.println("🔵 Initialisation Bluetooth BLE...");
+    
+    BLEDevice::init("HealthMonitor_ESP32");
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+
+    BLEService *pService = pServer->createService(SERVICE_UUID);
+
+    // Main data characteristic
+    pTxCharacteristic = pService->createCharacteristic(
+        CHARACTERISTIC_UUID_TX,
+        BLECharacteristic::PROPERTY_NOTIFY
+    );
+    pTxCharacteristic->addDescriptor(new BLE2902());
+
+    // PPG Raw Data Characteristic (High frequency)
+    pPpgRawCharacteristic = pService->createCharacteristic(
+        CHARACTERISTIC_UUID_PPG_RAW,
+        BLECharacteristic::PROPERTY_NOTIFY
+    );
+    pPpgRawCharacteristic->addDescriptor(new BLE2902());
+
+    // Motion Raw Data Characteristic (High frequency)
+    pMotionRawCharacteristic = pService->createCharacteristic(
+        CHARACTERISTIC_UUID_MOTION_RAW,
+        BLECharacteristic::PROPERTY_NOTIFY
+    );
+    pMotionRawCharacteristic->addDescriptor(new BLE2902());
+
+    BLECharacteristic *pRxCharacteristic = pService->createCharacteristic(
+        CHARACTERISTIC_UUID_RX,
+        BLECharacteristic::PROPERTY_WRITE
+    );
+    pRxCharacteristic->setCallbacks(new MyCallbacks());
+
+    pService->start();
+    pServer->getAdvertising()->start();
+    Serial.println("✅ Bluetooth BLE initialisé avec 3 caractéristiques");
+}
+
+// Heart Rate Processing Task
+void ppgTask(void *parameter) {
+    Serial.println("🫀 PPG Task Started on Core " + String(xPortGetCoreID()));
+    
+    const int sampleInterval = 10;
+    unsigned long lastSampleTime = 0;
+    bool lastFingerState = false;
+    unsigned long lastStateChangeTime = 0;
+    const unsigned long DEBOUNCE_TIME = 1000;
+    
+    // Library algorithm variables
+    const byte RATE_SIZE = 4;
+    byte rates[RATE_SIZE];
+    byte rateSpot = 0;
+    long lastBeat = 0;
+    float beatsPerMinute;
+    int beatAvg;
+    
+    // Initialize
+    for(byte x = 0 ; x < RATE_SIZE ; x++) {
+        rates[x] = 0;
+    }
+    
+    for(;;) {
+        unsigned long currentTime = millis();
+        
+        if (currentTime - lastSampleTime >= sampleInterval) {
+            lastSampleTime = currentTime;
+            
+            long irValue = particleSensor.getIR();
+            systemData.irValue = irValue;
+            
+            // Finger detection
+            bool currentFingerDetected = (irValue > 50000);
+            
+            if (currentFingerDetected != lastFingerState) {
+                lastStateChangeTime = currentTime;
+            }
+            
+            if (currentTime - lastStateChangeTime >= DEBOUNCE_TIME) {
+                if (currentFingerDetected && !systemData.fingerDetected) {
+                    systemData.fingerDetected = true;
+                    Serial.println("🎯 DOIGT DÉTECTÉ - Utilisation algorithme MAX30105...");
+                    // Reset heart rate calculation
+                    lastBeat = 0;
+                    for(byte x = 0 ; x < RATE_SIZE ; x++) {
+                        rates[x] = 0;
+                    }
+                    rateSpot = 0;
+                    beatAvg = 0;
+                } else if (!currentFingerDetected && systemData.fingerDetected) {
+                    systemData.fingerDetected = false;
+                    Serial.println("👋 DOIGT RETIRÉ");
+                    systemData.heartRate = 0.0;
+                    systemData.interBeatInterval = 0;
+                    systemData.signalQuality = 0.0;
+                }
+            }
+            lastFingerState = currentFingerDetected;
+            
+            // USE LIBRARY'S PROVEN BEAT DETECTION ALGORITHM
+            if (systemData.fingerDetected) {
+                if (checkForBeat(irValue) == true) {
+                    // We sensed a beat!
+                    long delta = millis() - lastBeat;
+                    lastBeat = millis();
+                    
+                    if (delta > 300) { // Physiologically possible
+                        systemData.interBeatInterval = delta;
+                        
+                        beatsPerMinute = 60000 / delta;
+                        
+                        if (beatsPerMinute < 255 && beatsPerMinute > 20) {
+                            rates[rateSpot++] = (byte)beatsPerMinute;
+                            rateSpot %= RATE_SIZE;
+                            
+                            // Take average of readings
+                            beatAvg = 0;
+                            for (byte x = 0 ; x < RATE_SIZE ; x++) {
+                                beatAvg += rates[x];
+                            }
+                            beatAvg /= RATE_SIZE;
+                            
+                            systemData.heartRate = beatAvg;
+                            
+                            Serial.print("💓 BEAT! BPM=");
+                            Serial.print(beatAvg);
+                            Serial.print(", IBI=");
+                            Serial.print(delta);
+                            Serial.print("ms, IR=");
+                            Serial.println(irValue);
+                        }
+                    }
+                }
+                
+                // Signal quality
+                static long lastIr = 0;
+                if (lastIr != 0) {
+                    long variation = abs(irValue - lastIr);
+                    systemData.signalQuality = customMax(0.0f, customMin(100.0f, (variation / 1000.0f) * 100.0f));
+                }
+                lastIr = irValue;
+                
+            } else {
+                systemData.signalQuality = 0.0;
+                systemData.heartRate = 0.0;
+                systemData.interBeatInterval = 0;
+            }
+        }
+        
+        vTaskDelay(1 / portTICK_PERIOD_MS);
+    }
+}
+
+// PPG Raw Data Task (High Frequency - 50Hz)
+void ppgRawTask(void *parameter) {
+    Serial.println("📈 PPG Raw Task Started on Core " + String(xPortGetCoreID()));
+    
+    const int sampleInterval = 20; // 50Hz sampling
+    unsigned long lastSampleTime = 0;
+    unsigned long lastTransmitTime = 0;
+    const unsigned long transmitInterval = 100; // Transmit every 100ms
+    
+    for(;;) {
+        unsigned long currentTime = millis();
+        
+        if (currentTime - lastSampleTime >= sampleInterval) {
+            lastSampleTime = currentTime;
+            
+            // Get raw PPG data
+            long irValue = particleSensor.getIR();
+            long redValue = particleSensor.getRed();
+            unsigned long timestamp = micros(); // High resolution timestamp
+            
+            // Send via BLE if connected and finger detected
+            if (deviceConnected && systemData.fingerDetected && 
+                (currentTime - lastTransmitTime >= transmitInterval)) {
+                lastTransmitTime = currentTime;
+                
+                String ppgRawData = "PPG_RAW|IR:" + String(irValue) + 
+                                  "|RED:" + String(redValue) + 
+                                  "|TS:" + String(timestamp);
+                
+                pPpgRawCharacteristic->setValue(ppgRawData.c_str());
+                pPpgRawCharacteristic->notify();
+            }
+        }
+        
+        vTaskDelay(1 / portTICK_PERIOD_MS);
+    }
+}
+
+// Motion Sensor Task (High Frequency - 50Hz)
+void motionTask(void *parameter) {
+    Serial.println("🏃 Motion Task Started on Core " + String(xPortGetCoreID()));
+    
+    const int sampleInterval = 20; // 50Hz sampling
+    unsigned long lastSampleTime = 0;
+    unsigned long lastTransmitTime = 0;
+    const unsigned long transmitInterval = 100; // Transmit every 100ms
+    
+    for(;;) {
+        unsigned long currentTime = millis();
+        
+        if (currentTime - lastSampleTime >= sampleInterval) {
+            lastSampleTime = currentTime;
+            
+            // Get accelerometer data
+            int16_t ax, ay, az;
+            mpu.getAcceleration(&ax, &ay, &az);
+            
+            systemData.accelX = ax / 16384.0;
+            systemData.accelY = ay / 16384.0;
+            systemData.accelZ = az / 16384.0;
+            
+            // Get gyroscope data
+            int16_t gx, gy, gz;
+            mpu.getRotation(&gx, &gy, &gz);
+            
+            systemData.gyroX = gx / 131.0; // Convert to °/s
+            systemData.gyroY = gy / 131.0;
+            systemData.gyroZ = gz / 131.0;
+            
+            // Calculate acceleration magnitude
+            systemData.accelMagnitude = sqrt(systemData.accelX * systemData.accelX + 
+                                          systemData.accelY * systemData.accelY + 
+                                          systemData.accelZ * systemData.accelZ);
+            
+            // Motion state classification
+            if (systemData.accelMagnitude < 1.1) {
+                strcpy(systemData.motionState, "REST");
+            } else if (systemData.accelMagnitude < 1.5) {
+                strcpy(systemData.motionState, "LIGHT");
+            } else if (systemData.accelMagnitude < 2.0) {
+                strcpy(systemData.motionState, "WALK");
+            } else {
+                strcpy(systemData.motionState, "RUN");
+            }
+            
+            // Send via BLE if connected
+            if (deviceConnected && (currentTime - lastTransmitTime >= transmitInterval)) {
+                lastTransmitTime = currentTime;
+                
+                String motionRawData = "MOTION_RAW|AX:" + String(systemData.accelX, 3) +
+                                     "|AY:" + String(systemData.accelY, 3) +
+                                     "|AZ:" + String(systemData.accelZ, 3) +
+                                     "|GX:" + String(systemData.gyroX, 3) +
+                                     "|GY:" + String(systemData.gyroY, 3) +
+                                     "|GZ:" + String(systemData.gyroZ, 3) +
+                                     "|MAG:" + String(systemData.accelMagnitude, 3) +
+                                     "|TS:" + String(micros());
+                
+                pMotionRawCharacteristic->setValue(motionRawData.c_str());
+                pMotionRawCharacteristic->notify();
+            }
+        }
+        
+        vTaskDelay(1 / portTICK_PERIOD_MS);
+    }
+}
+
+// Bluetooth Task
+void bleTask(void *parameter) {
+    Serial.println("📱 BLE Task Started on Core " + String(xPortGetCoreID()));
+    
+    const int sendInterval = 1000; // Main data at 1Hz
+    unsigned long lastSendTime = 0;
+    
+    for(;;) {
+        unsigned long currentTime = millis();
+        
+        // Send main processed data at lower frequency
+        if (deviceConnected && (currentTime - lastSendTime >= sendInterval)) {
+            lastSendTime = currentTime;
+            
+            String bleData = "";
+            if (systemData.fingerDetected) {
+                bleData = String("HR:YES|IR:") + String(systemData.irValue) +
+                         "|BPM:" + String(systemData.heartRate, 1) +
+                         "|IBI:" + String(systemData.interBeatInterval) +
+                         "|Quality:" + String(systemData.signalQuality, 1);
+            } else {
+                bleData = "HR:NO";
+            }
+            
+            bleData += "|AX:" + String(systemData.accelX, 2) +
+                      "|AY:" + String(systemData.accelY, 2) +
+                      "|AZ:" + String(systemData.accelZ, 2) +
+                      "|GX:" + String(systemData.gyroX, 2) +
+                      "|GY:" + String(systemData.gyroY, 2) +
+                      "|GZ:" + String(systemData.gyroZ, 2) +
+                      "|MAG:" + String(systemData.accelMagnitude, 2) +
+                      "|Motion:" + String(systemData.motionState) +
+                      "|RTOS:YES" +
+                      "|Time:" + String(systemData.systemTime);
+            
+            pTxCharacteristic->setValue(bleData.c_str());
+            pTxCharacteristic->notify();
+        }
+        
+        // Handle BLE connection state
+        if (!deviceConnected && oldDeviceConnected) {
+            vTaskDelay(500 / portTICK_PERIOD_MS);
+            pServer->startAdvertising();
+            oldDeviceConnected = deviceConnected;
+        }
+        if (deviceConnected && !oldDeviceConnected) {
+            oldDeviceConnected = deviceConnected;
+        }
+        
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+    }
+}
+
+// Display Task
+void displayTask(void *parameter) {
+    Serial.println("📊 Display Task Started on Core " + String(xPortGetCoreID()));
+    
+    const int updateInterval = 500;
+    unsigned long lastUpdateTime = 0;
+    
+    for(;;) {
+        unsigned long currentTime = millis();
+        
+        if (currentTime - lastUpdateTime >= updateInterval) {
+            lastUpdateTime = currentTime;
+            
+            if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {
+                display.clearDisplay();
+                display.setCursor(0,0);
+                
+                // Display header based on mode
+                switch(displayMode) {
+                    case 0:
+                        display.println("HEART RATE MODE");
+                        break;
+                    case 1:
+                        display.println("MOTION MODE");
+                        break;
+                    case 2:
+                        display.println("SENSOR MODE");
+                        break;
+                }
+                display.drawFastHLine(0, 10, 128, SSD1306_WHITE);
+                display.setCursor(0, 12);
+                
+                // Display content based on mode
+                if (displayMode == 0) {
+                    // Heart Rate Mode
+                    if (systemData.fingerDetected && systemData.heartRate > 0) {
+                        display.setTextSize(2);
+                        display.print("BPM: ");
+                        display.println(systemData.heartRate, 0);
+                        display.setTextSize(1);
+                        display.print("IBI: ");
+                        display.print(systemData.interBeatInterval);
+                        display.println(" ms");
+                        display.print("Quality: ");
+                        display.print(systemData.signalQuality, 1);
+                        display.println("%");
+                    } else {
+                        display.println("Place finger");
+                        display.println("on sensor");
+                    }
+                }
+                else if (displayMode == 1) {
+                    // Motion Mode
+                    display.print("Motion: ");
+                    display.println(systemData.motionState);
+                    display.print("Accel: ");
+                    display.print(systemData.accelX, 1);
+                    display.print(",");
+                    display.print(systemData.accelY, 1);
+                    display.print(",");
+                    display.println(systemData.accelZ, 1);
+                    display.print("Gyro: ");
+                    display.print(systemData.gyroX, 1);
+                    display.print(",");
+                    display.print(systemData.gyroY, 1);
+                    display.print(",");
+                    display.println(systemData.gyroZ, 1);
+                    display.print("Mag: ");
+                    display.println(systemData.accelMagnitude, 2);
+                }
+                else if (displayMode == 2) {
+                    // Sensor Mode
+                    display.print("IR: ");
+                    display.println(systemData.irValue);
+                    display.print("Finger: ");
+                    display.println(systemData.fingerDetected ? "YES" : "NO");
+                    display.print("HR: ");
+                    display.print(systemData.heartRate, 1);
+                    display.println(" BPM");
+                    display.print("Time: ");
+                    display.print(systemData.systemTime);
+                    display.println("s");
+                    display.print("BLE: ");
+                    display.println(systemData.bleConnected ? "ON" : "OFF");
+                }
+                
+                // Footer
+                display.setCursor(0, 56);
+                display.print("Data:50Hz");
+                display.setCursor(90, 56);
+                display.print("M");
+                display.print(displayMode + 1);
+                
+                display.display();
+                xSemaphoreGive(xMutex);
+            }
+        }
+        
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+    }
+}
+
+// Serial Output Task
+void serialTask(void *parameter) {
+    Serial.println("💻 Serial Task Started on Core " + String(xPortGetCoreID()));
+    
+    const int printInterval = 2000; // Reduced frequency to avoid flooding
+    unsigned long lastPrintTime = 0;
+    unsigned long startTime = millis();
+    
+    for(;;) {
+        unsigned long currentTime = millis();
+        systemData.systemTime = (currentTime - startTime) / 1000;
+        
+        if (currentTime - lastPrintTime >= printInterval) {
+            lastPrintTime = currentTime;
+            
+            if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {
+                Serial.println("=== SYSTEM STATUS ===");
+                
+                if (systemData.fingerDetected) {
+                    Serial.print("❤️  HR:YES | BPM:");
+                    Serial.print(systemData.heartRate, 1);
+                    Serial.print(" | IBI:");
+                    Serial.print(systemData.interBeatInterval);
+                    Serial.print("ms | Quality:");
+                    Serial.print(systemData.signalQuality, 1);
+                    Serial.print("% | IR:");
+                    Serial.println(systemData.irValue);
+                } else {
+                    Serial.println("👋 HR:NO - Place finger on sensor");
+                }
+                
+                Serial.print("🏃 Motion:");
+                Serial.print(systemData.motionState);
+                Serial.print(" | Accel:");
+                Serial.print(systemData.accelX, 2);
+                Serial.print(",");
+                Serial.print(systemData.accelY, 2);
+                Serial.print(",");
+                Serial.print(systemData.accelZ, 2);
+                Serial.print(" | Gyro:");
+                Serial.print(systemData.gyroX, 2);
+                Serial.print(",");
+                Serial.print(systemData.gyroY, 2);
+                Serial.print(",");
+                Serial.print(systemData.gyroZ, 2);
+                Serial.print(" | Mag:");
+                Serial.print(systemData.accelMagnitude, 2);
+                Serial.print(" | BLE:");
+                Serial.print(systemData.bleConnected ? "ON" : "OFF");
+                Serial.print(" | Time:");
+                Serial.print(systemData.systemTime);
+                Serial.println("s");
+                Serial.println("=====================");
+                
+                xSemaphoreGive(xMutex);
+            }
+        }
+        
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    delay(1000); // Important delay for serial stabilization
+    Serial.println("\n\n🚀 Health Smartwatch System Starting...");
+    Serial.println("📋 Configuration: PPG 50Hz + Motion 50Hz + 3 BLE Channels");
+    
+    // Initialize mutex
+    xMutex = xSemaphoreCreateMutex();
+    if (xMutex == NULL) {
+        Serial.println("❌ Failed to create mutex");
+        while(1);
+    }
+    
+    // Initialize system data
+    memset(&systemData, 0, sizeof(systemData));
+    systemData.rtosRunning = true;
+    strcpy(systemData.motionState, "REST");
+    
+    // Initialize Button
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), handleButtonPress, FALLING);
+    Serial.println("✅ Button initialized on GPIO4");
+    
+    // Initialize hardware
+    if (!initializeSensors()) {
+        Serial.println("❌ Sensor initialization failed!");
+        while(1);
+    }
+    
+    initializeBluetooth();
+    
+    Serial.println("==================================================");
+    Serial.println("    FREE RTOS SYSTEM - 6 PARALLEL TASKS");
+    Serial.println("    PPG: 50Hz | Motion: 50Hz | 3 BLE Channels");
+    Serial.println("==================================================");
+    
+    // Create FreeRTOS tasks with optimized stack sizes
+    xTaskCreatePinnedToCore(ppgTask, "PPG_Task", 4096, NULL, 1, &ppgTaskHandle, 0);
+    xTaskCreatePinnedToCore(ppgRawTask, "PPG_Raw_Task", 4096, NULL, 1, &ppgRawTaskHandle, 0);
+    xTaskCreatePinnedToCore(motionTask, "Motion_Task", 4096, NULL, 1, &motionTaskHandle, 0);
+    xTaskCreatePinnedToCore(bleTask, "BLE_Task", 8192, NULL, 1, &bleTaskHandle, 1);
+    xTaskCreatePinnedToCore(displayTask, "Display_Task", 4096, NULL, 1, &displayTaskHandle, 1);
+    xTaskCreatePinnedToCore(serialTask, "Serial_Task", 4096, NULL, 1, &serialTaskHandle, 1);
+    
+    Serial.println("🎯 Démarrage des tâches parallèles...");
+    delay(1000);
+    
+    Serial.println("🎯 FreeRTOS System Started - 6 Parallel Tasks Running");
+    Serial.println("✅ Tous les capteurs initialisés");
+    Serial.println("\n👆 Place your finger firmly on the MAX30102 sensor");
+    Serial.println("🔘 Press BOOT button to switch display modes");
+    Serial.println("📡 BLE transmettra:");
+    Serial.println("   - Données PPG brutes à 50Hz");
+    Serial.println("   - Données mouvement brutes à 50Hz");
+    Serial.println("   - Données traitées à 1Hz");
+}
+
+void loop() {
+    // FreeRTOS handles all tasks, main loop is empty
+    vTaskDelete(NULL); // Delete the loop task to free resources
+}
