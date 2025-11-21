@@ -10,6 +10,11 @@ import 'data/providers/user_provider.dart';
 import 'data/providers/health_provider.dart';
 import 'routing/app_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:flutter/foundation.dart';
+import 'pages/dashboard/dashboard_page.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'presentation/bluetooth/bluetooth_page.dart';
+import 'presentation/bluetooth/device_page.dart';
 
 final supabase = Supabase.instance.client;
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();

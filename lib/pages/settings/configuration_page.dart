@@ -8,7 +8,6 @@ import 'package:smartwatch_v2/main.dart';
 import 'package:smartwatch_v2/routing/app_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-
 class ConfigurationPage extends StatefulWidget {
   const ConfigurationPage({super.key});
 
@@ -24,13 +23,24 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
   final TextEditingController _sleepdurationController =
       TextEditingController();
 
-  // 2. Variables d'état pour le genre et l'insomnie
+  // 2. Variables d'état pour le genre, l'insomnie et skin_type
   String? _selectedGender;
   bool _hasInsomnia = false;
   XFile? _profileImage;
   String? _profileImageUrl;
+  int? _selectedSkinType;
 
   final List<String> _genders = ['Homme', 'Femme', 'Autre'];
+
+  // Liste des phototypes cutanés
+  final List<Map<String, dynamic>> _skinTypes = [
+    {'value': 1, 'label': '1 - Peau très claire (roux, blonds)'},
+    {'value': 2, 'label': '2 - Peau claire (blonds, châtains)'},
+    {'value': 3, 'label': '3 - Peau intermédiaire (méditerranéenne)'},
+    {'value': 4, 'label': '4 - Peau mate (olive)'},
+    {'value': 5, 'label': '5 - Peau foncée (brune)'},
+    {'value': 6, 'label': '6 - Peau très foncée (noire)'},
+  ];
 
   @override
   void dispose() {
@@ -38,7 +48,6 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
     _heightController.dispose();
     _weightController.dispose();
     _sleepdurationController.dispose();
-
     super.dispose();
   }
 
@@ -67,6 +76,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
           _selectedGender = config['gender'];
           _hasInsomnia = config['has_insomnia'] ?? false;
           _profileImageUrl = config['profile_image_url'];
+          _selectedSkinType = config['skin_type'];
         });
       }
     }
@@ -94,6 +104,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
       'sleep_duration': double.tryParse(_sleepdurationController.text),
       'gender': _selectedGender,
       'has_insomnia': _hasInsomnia,
+      'skin_type': _selectedSkinType,
     };
 
     try {
@@ -108,6 +119,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
         );
         return;
       }
+
       // Upload de l'image si sélectionnée
       if (_profileImage != null) {
         final user = supabase.auth.currentUser!;
@@ -142,6 +154,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
           );
         }
       }
+
       // 🔍 Vérifier si une configuration existe déjà pour cet utilisateur
       final existing = await supabase
           .from('user_configurations')
@@ -161,10 +174,11 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
               'has_insomnia': configData['has_insomnia'],
               'sleep_duration': configData['sleep_duration'],
               'profile_image_url': _profileImageUrl,
+              'skin_type': configData['skin_type'],
             })
             .eq('user_id', user.id);
       } else {
-        // 🟢 Insertion si aucune configuration n’existe encore
+        // 🟢 Insertion si aucune configuration n'existe encore
         await supabase.from('user_configurations').insert({
           'user_id': user.id,
           'age': configData['age'],
@@ -174,6 +188,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
           'has_insomnia': configData['has_insomnia'],
           'sleep_duration': configData['sleep_duration'],
           'profile_image_url': _profileImageUrl,
+          'skin_type': configData['skin_type'],
         });
       }
 
@@ -221,6 +236,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
 
   Widget _buildGenderSelector() {
     return Container(
+      margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
       decoration: BoxDecoration(
         border: Border.all(color: Colors.grey.shade300),
@@ -238,6 +254,36 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
           onChanged: (String? newValue) {
             setState(() {
               _selectedGender = newValue;
+            });
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSkinTypeSelector() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.grey.shade300),
+        borderRadius: BorderRadius.circular(12),
+        color: AppTheme.lightTheme.primaryColor,
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<int>(
+          isExpanded: true,
+          hint: const Text('Sélectionnez votre type de peau'),
+          value: _selectedSkinType,
+          items: _skinTypes.map((Map<String, dynamic> skinType) {
+            return DropdownMenuItem<int>(
+              value: skinType['value'],
+              child: Text(skinType['label']),
+            );
+          }).toList(),
+          onChanged: (int? newValue) {
+            setState(() {
+              _selectedSkinType = newValue;
             });
           },
         ),
@@ -328,7 +374,9 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
 
                     // Sélecteur de GENRE
                     _buildGenderSelector(),
-                    const SizedBox(height: 16),
+
+                    // Sélecteur de SKIN TYPE
+                    _buildSkinTypeSelector(),
 
                     // Champ TAILLE (HEIGHT)
                     _buildNumericField(
@@ -343,10 +391,11 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
                       label: 'Poids',
                       suffix: 'kg',
                     ),
+
                     // Champ sleep_duration
                     _buildNumericField(
                       controller: _sleepdurationController,
-                      label: 'sleep_duration',
+                      label: 'Durée de sommeil',
                       suffix: 'H',
                     ),
                   ],
@@ -455,7 +504,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
         showSelectedLabels: false,
         showUnselectedLabels: false,
         onTap: (i) {
-          setState(() => _currentIndex = i); // <-- maintenant ok
+          setState(() => _currentIndex = i);
           switch (i) {
             case 0:
               Navigator.pushNamed(context, AppRouter.dashboard);

@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:path/path.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:smartwatch_v2/main.dart';
+import 'package:smartwatch_v2/pages/health/HealthMonitorScreen.dart';
 import 'package:smartwatch_v2/routing/app_router.dart';
 import 'package:smartwatch_v2/services/data_sync_service.dart';
 import 'package:smartwatch_v2/services/notification_service.dart';
@@ -17,6 +20,10 @@ import 'package:geolocator/geolocator.dart';
 import 'dart:math';
 import 'package:smartwatch_v2/data/models/user_metric.dart';
 import 'package:smartwatch_v2/data/models/user_configuration.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import '../../presentation/bluetooth/bluetooth_page.dart'
+    hide HealthMonitorScreen;
+import '../../presentation/bluetooth//device_page.dart';
 
 final StreamController<Map<String, dynamic>> chartStream =
     StreamController.broadcast();
@@ -29,15 +36,13 @@ class RealTimeChart extends StatefulWidget {
 class _RealTimeChartState extends State<RealTimeChart> {
   final List<FlSpot> bpmData = [];
   int xValue = 0;
-  StreamSubscription? _chartSubscription; // AJOUT
+  StreamSubscription? _chartSubscription;
 
   @override
   void initState() {
     super.initState();
     _chartSubscription = chartStream.stream.listen((data) {
-      // MODIFICATION
       if (mounted) {
-        // AJOUT : vérifier si le widget est toujours monté
         setState(() {
           bpmData.add(
             FlSpot(xValue.toDouble(), (data['bpm'] as int).toDouble()),
@@ -53,7 +58,7 @@ class _RealTimeChartState extends State<RealTimeChart> {
 
   @override
   void dispose() {
-    _chartSubscription?.cancel(); // AJOUT : annuler la subscription
+    _chartSubscription?.cancel();
     super.dispose();
   }
 
@@ -73,40 +78,309 @@ class _RealTimeChartState extends State<RealTimeChart> {
 
 void startSimulatedData(DataSyncService service) {
   Timer.periodic(Duration(seconds: 5), (_) async {
-    final data = service.generateTestData(); // Génère des données simulées
-    chartStream.add(data); // Envoie au chart
+    final data = service.generateTestData();
+    chartStream.add(data);
     print("Nouvelle donnée simulée : $data");
   });
 }
 
+class CaloriesService {
+  final supabase = Supabase.instance.client;
+
+  Future<List<Map<String, dynamic>>> getCaloriesData() async {
+    try {
+      final user = supabase.auth.currentUser;
+      if (user == null) {
+        print("Utilisateur non connecté");
+        return [];
+      }
+
+      final response = await supabase
+          .from('calories_predictions')
+          .select('created_at, calories_burned')
+          .eq('user_id', user.id)
+          .order('created_at', ascending: true)
+          .limit(30);
+
+      return response;
+    } catch (e) {
+      print("Erreur dans getCaloriesData: $e");
+      return [];
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getRecentCaloriesData() async {
+    try {
+      final user = supabase.auth.currentUser;
+      if (user == null) return [];
+
+      final sevenDaysAgo = DateTime.now()
+          .subtract(Duration(days: 7))
+          .toIso8601String();
+
+      final response = await supabase
+          .from('calories_predictions')
+          .select('created_at, calories_burned')
+          .eq('user_id', user.id)
+          .gte('created_at', sevenDaysAgo)
+          .order('created_at', ascending: true);
+
+      return response;
+    } catch (e) {
+      print("Erreur dans getRecentCaloriesData: $e");
+      return [];
+    }
+  }
+}
+
+List<FlSpot> caloriesToSpots(List<Map<String, dynamic>> data) {
+  return data.asMap().entries.map((entry) {
+    int index = entry.key;
+    double calories = (entry.value['calories_burned'] as num).toDouble();
+    return FlSpot(index.toDouble(), calories);
+  }).toList();
+}
+
+class CaloriesChart extends StatelessWidget {
+  final List<Map<String, dynamic>> data;
+
+  const CaloriesChart({super.key, required this.data});
+
+  @override
+  Widget build(BuildContext context) {
+    final spots = caloriesToSpots(data);
+
+    // Calculer les valeurs min/max pour l'échelle Y
+    double minY = 0;
+    double maxY = 500;
+    if (spots.isNotEmpty) {
+      final calories = data
+          .map((e) => (e['calories_burned'] as num).toDouble())
+          .toList();
+      minY = 0; // Toujours commencer à 0 pour les calories
+      maxY = calories.reduce((a, b) => a > b ? a : b) * 1.2;
+      maxY = maxY.clamp(100, 2000); // Limiter entre 100 et 2000 calories
+    }
+
+    return LineChart(
+      LineChartData(
+        gridData: FlGridData(
+          show: true,
+          drawVerticalLine: true,
+          horizontalInterval: max(50, maxY / 5),
+          verticalInterval: 1,
+        ),
+        titlesData: FlTitlesData(
+          show: true,
+          rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 22,
+              interval: data.length > 10 ? 2 : 1,
+              getTitlesWidget: (value, meta) {
+                if (value.toInt() < data.length) {
+                  final date = DateTime.parse(
+                    data[value.toInt()]['created_at'],
+                  );
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: Text(
+                      '${date.day}/${date.month}',
+                      style: TextStyle(fontSize: 10, color: Colors.grey),
+                    ),
+                  );
+                }
+                return Text('');
+              },
+            ),
+          ),
+          leftTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              interval: max(50, maxY / 5),
+              reservedSize: 40,
+              getTitlesWidget: (value, meta) {
+                return Text(
+                  '${value.toInt()}',
+                  style: TextStyle(fontSize: 10, color: Colors.grey),
+                );
+              },
+            ),
+          ),
+        ),
+        borderData: FlBorderData(
+          show: true,
+          border: Border.all(color: Colors.grey.withOpacity(0.3), width: 1),
+        ),
+        minY: minY,
+        maxY: maxY,
+        lineBarsData: [
+          LineChartBarData(
+            spots: spots,
+            isCurved: true,
+            color: Colors.orange,
+            barWidth: 3,
+            isStrokeCapRound: true,
+            dotData: FlDotData(show: false),
+            belowBarData: BarAreaData(
+              show: true,
+              gradient: LinearGradient(
+                colors: [
+                  Colors.orange.withOpacity(0.3),
+                  Colors.orange.withOpacity(0.1),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class VitaminDService {
+  final supabase = Supabase.instance.client;
+
+  Future<List<Map<String, dynamic>>> getVitaminDScores() async {
+    try {
+      final user = supabase.auth.currentUser;
+      if (user == null) {
+        print("Utilisateur non connecté");
+        return [];
+      }
+
+      final response = await supabase
+          .from('daily_vitamin_d')
+          .select('date, vitamin_d_score')
+          .eq('user_id', user.id)
+          .order('date', ascending: true)
+          .limit(30);
+
+      return response;
+    } catch (e) {
+      print("Erreur dans getVitaminDScores: $e");
+      return [];
+    }
+  }
+}
+
+List<FlSpot> toSpots(List<Map<String, dynamic>> data) {
+  return data.asMap().entries.map((entry) {
+    int index = entry.key;
+    double score = (entry.value['vitamin_d_score'] as num).toDouble();
+    return FlSpot(index.toDouble(), score);
+  }).toList();
+}
+
+class VitaminDChart extends StatelessWidget {
+  final List<Map<String, dynamic>> data;
+
+  const VitaminDChart({super.key, required this.data});
+
+  @override
+  Widget build(BuildContext context) {
+    final spots = toSpots(data);
+
+    return LineChart(
+      LineChartData(
+        gridData: FlGridData(
+          show: true,
+          drawVerticalLine: true,
+          horizontalInterval: 20,
+        ),
+        titlesData: FlTitlesData(
+          show: true,
+          rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 22,
+              interval: data.length > 10 ? 2 : 1,
+              getTitlesWidget: (value, meta) {
+                if (value.toInt() < data.length) {
+                  final date = DateTime.parse(data[value.toInt()]['date']);
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: Text(
+                      '${date.day}/${date.month}',
+                      style: TextStyle(fontSize: 10, color: Colors.grey),
+                    ),
+                  );
+                }
+                return Text('');
+              },
+            ),
+          ),
+          leftTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              interval: 20,
+              reservedSize: 40,
+              getTitlesWidget: (value, meta) {
+                return Text(
+                  '${value.toInt()}',
+                  style: TextStyle(fontSize: 10, color: Colors.grey),
+                );
+              },
+            ),
+          ),
+        ),
+        borderData: FlBorderData(
+          show: true,
+          border: Border.all(color: Colors.grey.withOpacity(0.3), width: 1),
+        ),
+        minY: 0,
+        maxY: 100,
+        lineBarsData: [
+          LineChartBarData(
+            spots: spots,
+            isCurved: true,
+            color: Colors.blue,
+            barWidth: 3,
+            isStrokeCapRound: true,
+            dotData: FlDotData(show: false),
+            belowBarData: BarAreaData(
+              show: true,
+              gradient: LinearGradient(
+                colors: [
+                  Colors.blue.withOpacity(0.3),
+                  Colors.blue.withOpacity(0.1),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 final supabase = Supabase.instance.client;
 
-/// ⚡ Calcule le nombre approximatif de pas à partir des données d'accélération
 int calculateSteps(List<UserMetric> metrics) {
   int steps = 0;
   for (var m in metrics) {
-    // Simple estimation: chaque "pic" d'accélération compte comme un pas
     double magnitude = sqrt(
       pow(m.accelX, 2) + pow(m.accelY, 2) + pow(m.accelZ - 1.0, 2),
     );
-    if (magnitude > 0.2) steps += 1; // seuil à ajuster selon capteur
+    if (magnitude > 0.2) steps += 1;
   }
   return steps;
 }
 
-/// ⚡ Calcule la qualité du sommeil (0-100) approximativement
 double calculateSleepQuality(List<UserMetric> metrics) {
-  if (metrics.isEmpty) return 50.0; // valeur par défaut
+  if (metrics.isEmpty) return 50.0;
 
   double motionPenalty = 0.0;
   double bpmPenalty = 0.0;
 
   for (var m in metrics) {
-    // motion "STATIONARY" = pas de pénalité
     if (m.motion != null && m.motion?.toUpperCase() != 'STATIONARY')
       motionPenalty += 1.0;
 
-    // BPM élevé la nuit = moins bonne qualité
     if (m.bpm != null && m.bpm! > 80) bpmPenalty += (m.bpm! - 80) / 100;
   }
 
@@ -115,7 +389,6 @@ double calculateSleepQuality(List<UserMetric> metrics) {
   return quality.clamp(0.0, 100.0);
 }
 
-/// ⚡ Calcule le niveau d'activité physique
 double calculatePhysicalActivity(List<UserMetric> metrics) {
   if (metrics.isEmpty) return 1.0;
 
@@ -127,12 +400,10 @@ double calculatePhysicalActivity(List<UserMetric> metrics) {
     activityScore += magnitude;
   }
 
-  // Normaliser sur le nombre d'échantillons pour obtenir un score moyen
   double avgScore = activityScore / metrics.length;
-  return (avgScore * 5).clamp(0.5, 3.0); // score approximatif 0.5-3.0
+  return (avgScore * 5).clamp(0.5, 3.0);
 }
 
-/// ⚡ Estimation de la pression artérielle à partir du BPM et du BMI
 double estimateBloodPressure(
   UserConfiguration config,
   List<UserMetric> metrics,
@@ -142,10 +413,9 @@ double estimateBloodPressure(
   double avgBpm =
       metrics.map((m) => m.bpm ?? 70).reduce((a, b) => a + b) / metrics.length;
 
-  // Approximation simple : systolic = 110 + 0.5*BPM + 0.1*BMI
   double bmi = config.weightKg / pow(config.heightCm / 100, 2);
   double systolic = 110 + 0.5 * avgBpm + 0.1 * bmi;
-  return systolic.clamp(90.0, 160.0); // bornes réalistes
+  return systolic.clamp(90.0, 160.0);
 }
 
 class StressPredictionService {
@@ -161,7 +431,6 @@ class StressPredictionService {
 
     final userId = user.id;
 
-    // 1️⃣ Charger la config
     final configMap = await supabase
         .from('user_configurations')
         .select()
@@ -180,7 +449,6 @@ class StressPredictionService {
         ? 2
         : 0;
 
-    // 2️⃣ Charger les metrics récentes
     final metricsData = await supabase
         .from('user_metrics')
         .select()
@@ -192,7 +460,6 @@ class StressPredictionService {
         .map((m) => UserMetric.fromMap(m))
         .toList();
 
-    // 3️⃣ Calculs
     final dailySteps = calculateSteps(metricsList);
     final sleepQuality = calculateSleepQuality(metricsList);
     final physicalActivity = calculatePhysicalActivity(metricsList);
@@ -206,7 +473,6 @@ class StressPredictionService {
     final sleepDuration = config.sleepDuration;
     final bmi = config.weightKg / pow(config.heightCm / 100, 2);
 
-    // 4️⃣ Appel Edge Function
     try {
       final response = await supabase.functions.invoke(
         'prediction',
@@ -227,7 +493,6 @@ class StressPredictionService {
       );
 
       final predictionData = Map<String, dynamic>.from(response.data as Map);
-
       print("Stress prédit : ${predictionData['stress_level']}");
       return predictionData;
     } catch (e) {
@@ -243,7 +508,7 @@ class StressPredictionService {
       final result = await sendStressPrediction();
       if (result != null) {
         final stress = result['stress_level'].toString();
-        onUpdate(stress); // <-- On envoie la valeur au widget
+        onUpdate(stress);
       }
     });
   }
@@ -258,7 +523,6 @@ class StressNotificationService {
   DateTime? _stressStartTime;
   final StressPredictionService stressService;
 
-  // MODIFICATION: Pas besoin de contexte
   StressNotificationService(this.stressService);
 
   void _showStressNotification() {
@@ -299,12 +563,10 @@ class StressNotificationService {
     _stressStartTime = null;
   }
 
-  // MODIFICATION: Navigation globale sans contexte
   void _startBreathingExercise() {
     print("🧘‍♂️ Navigation vers l'exercice de respiration...");
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      // Utiliser la navigation globale via navigatorKey
       if (navigatorKey.currentState != null) {
         navigatorKey.currentState!.pushNamed(AppRouter.breathingExercise);
         print('✅ Navigation réussie vers BreathingExercise');
@@ -312,42 +574,6 @@ class StressNotificationService {
         print('❌ Navigator key non disponible');
       }
     });
-  }
-}
-
-// Constante pour le nom de l'Edge Function
-const String _vitaminDFunctionName =
-    'vitamin_d_estimator'; // Renommé pour clarté
-
-// Service isolé pour les appels à l'Edge Function
-class HealthIndicatorService {
-  final SupabaseClient _supabase = Supabase.instance.client;
-
-  Future<Map<String, dynamic>?> calculateDailyVitaminD(String userId) async {
-    try {
-      final response = await _supabase.functions.invoke(
-        _vitaminDFunctionName,
-        body: {'user_id': userId},
-      );
-      print('Réponse complète VitD: ${response.data}');
-
-      if (response.status == 200) {
-        final result = response.data;
-        print('Score Vitamine D reçu : ${result['vitamin_d_score']}');
-        return result;
-      } else {
-        print('Erreur Edge Function Vitamine D (Statut: ${response.status})');
-        print('Corps de l\'erreur: ${response.data}');
-        // Retourne une structure pour indiquer l'erreur ou l'absence de données
-        return {
-          'error': response.data['error'] ?? 'Unknown error',
-          'vitamin_d_score': 0,
-        };
-      }
-    } catch (e) {
-      print('Erreur générale lors de l\'appel de l\'Edge Function: $e');
-      return null;
-    }
   }
 }
 
@@ -359,42 +585,30 @@ class DashboardPage extends StatefulWidget {
 }
 
 class _DashboardPageState extends State<DashboardPage> {
-  // --- NOUVELLE VARIABLE D'ÉTAT ---
-  String _vitaminDScore = '--'; // Affichera le score ou '--' en attendant
+  // Variables pour Vitamin D
+  String _vitaminDScore = '--';
+  List<Map<String, dynamic>> vitaminDData = [];
+  bool loadingVitaminD = false;
+
+  // Variables pour Calories
+  List<Map<String, dynamic>> caloriesData = [];
+  bool loadingCalories = false;
+  String _todayCalories = '--';
+
   String? _userAvatarUrl;
   String? _stressLevel = '--';
-
   final StressPredictionService _predictionService = StressPredictionService();
-  final StressNotificationService _stressNotificationService; // AJOUT
-  // AJOUT: Constructeur pour initialiser le service de notification
-  _DashboardPageState()
-    : _stressNotificationService = StressNotificationService(
-        StressPredictionService(),
-      );
-  Future<void> _loadStressPrediction() async {
-    setState(() => _loading = true);
+  final StressNotificationService _stressNotificationService;
 
-    final result = await _predictionService.sendStressPrediction();
-    if (result != null) {
-      setState(() {
-        _stressLevel = result['stress_level'].toString();
-        _loading = false;
-      });
-    } else {
-      setState(() => _loading = false);
-    }
-  }
-
-  // ... (autres variables d'état existantes)
   int _currentIndex = 0;
   final _formKey = GlobalKey<FormState>();
-  final _formKeyCalories = GlobalKey<FormState>();
   bool _loading = false;
-  String? _result;
-  String? _resultCalories;
+
   String _weatherDescription = 'Chargement...';
   String _temperature = '--';
   IconData _weatherIcon = Icons.cloud_off;
+
+  // Contrôleurs
   final _genderController = TextEditingController();
   final _ageController = TextEditingController();
   final _occupationController = TextEditingController();
@@ -411,7 +625,159 @@ class _DashboardPageState extends State<DashboardPage> {
   final _durationController = TextEditingController();
   final _bodyTempController = TextEditingController();
 
-  // --- NOUVELLE FONCTION DE CHARGEMENT ---
+  _DashboardPageState()
+    : _stressNotificationService = StressNotificationService(
+        StressPredictionService(),
+      );
+
+  @override
+  void initState() {
+    super.initState();
+    final service = DataSyncService(supabase: Supabase.instance.client);
+    startSimulatedData(service);
+
+    _loadWeatherData();
+    _loadUserAvatarFromDatabase();
+    _loadVitaminDData();
+    _loadCaloriesData(); // Charger les calories au démarrage
+
+    _authSubscription = supabase.auth.onAuthStateChange.listen((data) {
+      final AuthChangeEvent event = data.event;
+
+      if (event == AuthChangeEvent.signedIn ||
+          event == AuthChangeEvent.initialSession) {
+        print("AUTH CHANGE: User is Signed In. Démarrage des services.");
+
+        _predictionService.stopAutoPrediction();
+        _loadStressPrediction();
+        _loadVitaminDScore();
+        _loadVitaminDData();
+        _loadCaloriesData(); // Recharger les calories
+
+        _predictionService.startAutoPrediction((value) {
+          if (mounted) {
+            setState(() {
+              _stressLevel = value;
+            });
+          }
+        });
+        _stressNotificationService.startMonitoring();
+      } else if (event == AuthChangeEvent.signedOut) {
+        print("AUTH CHANGE: User Signed Out. Arrêt des services.");
+        _predictionService.stopAutoPrediction();
+        _stressNotificationService.stopMonitoring();
+        if (mounted) {
+          setState(() {
+            _stressLevel = '--';
+            _vitaminDScore = '--';
+            _todayCalories = '--';
+            vitaminDData = [];
+            caloriesData = [];
+          });
+        }
+      }
+    });
+  }
+
+  Future<void> _loadCaloriesData() async {
+    if (mounted) {
+      setState(() {
+        loadingCalories = true;
+      });
+    }
+
+    try {
+      final service = CaloriesService();
+      final data = await service.getCaloriesData();
+
+      if (mounted) {
+        setState(() {
+          caloriesData = data;
+          loadingCalories = false;
+        });
+      }
+
+      _calculateTodayCalories(data);
+      print("Données calories chargées: ${data.length} enregistrements");
+    } catch (e) {
+      print("Erreur chargement calories: $e");
+      if (mounted) {
+        setState(() {
+          loadingCalories = false;
+        });
+      }
+    }
+  }
+
+  void _calculateTodayCalories(List<Map<String, dynamic>> data) {
+    final today = DateTime.now();
+    final todayString =
+        '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+
+    final todayData = data.where((item) {
+      final createdAt = DateTime.parse(item['created_at']);
+      final itemDate =
+          '${createdAt.year}-${createdAt.month.toString().padLeft(2, '0')}-${createdAt.day.toString().padLeft(2, '0')}';
+      return itemDate == todayString;
+    }).toList();
+
+    if (todayData.isNotEmpty) {
+      final totalToday = todayData
+          .map((e) => (e['calories_burned'] as num).toDouble())
+          .reduce((a, b) => a + b);
+
+      setState(() {
+        _todayCalories = totalToday.round().toString();
+      });
+    } else {
+      setState(() {
+        _todayCalories = '0';
+      });
+    }
+  }
+
+  Future<void> _loadStressPrediction() async {
+    setState(() => _loading = true);
+    final result = await _predictionService.sendStressPrediction();
+    if (result != null) {
+      setState(() {
+        _stressLevel = result['stress_level'].toString();
+        _loading = false;
+      });
+    } else {
+      setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _loadVitaminDData() async {
+    if (mounted) {
+      setState(() {
+        loadingVitaminD = true;
+      });
+    }
+
+    try {
+      final service = VitaminDService();
+      final data = await service.getVitaminDScores();
+
+      if (mounted) {
+        setState(() {
+          vitaminDData = data;
+          loadingVitaminD = false;
+        });
+      }
+
+      print("Données Vitamin D chargées: ${data.length} enregistrements");
+    } catch (e) {
+      print("Erreur chargement Vitamin D: $e");
+      if (mounted) {
+        setState(() {
+          loadingVitaminD = false;
+        });
+      }
+    }
+  }
+
   Future<void> _loadVitaminDScore() async {
     final userId = Supabase.instance.client.auth.currentUser?.id;
 
@@ -422,20 +788,175 @@ class _DashboardPageState extends State<DashboardPage> {
       return;
     }
 
-    final service = HealthIndicatorService();
-    final result = await service.calculateDailyVitaminD(userId);
+    try {
+      final response = await Supabase.instance.client
+          .from('daily_vitamin_d')
+          .select('vitamin_d_score')
+          .eq('user_id', userId)
+          .order('date', ascending: false)
+          .limit(1)
+          .single();
 
-    if (mounted) {
-      // Vérifie si le widget est toujours monté
+      if (response != null && response['vitamin_d_score'] != null) {
+        setState(() {
+          _vitaminDScore = response['vitamin_d_score'].toString();
+        });
+      }
+    } catch (e) {
+      print("Erreur chargement score Vitamin D: $e");
       setState(() {
-        if (result != null && result.containsKey('vitamin_d_score')) {
-          _vitaminDScore = result['vitamin_d_score'].toString();
-        } else {
-          // Affiche N/A si une erreur ou absence de données
-          _vitaminDScore = 'N/A';
-        }
+        _vitaminDScore = 'N/A';
       });
     }
+  }
+
+  Color _getVitaminDColor() {
+    if (_vitaminDScore == '--' || _vitaminDScore == 'N/A') {
+      return Colors.grey;
+    }
+
+    final score = double.tryParse(_vitaminDScore) ?? 0;
+    if (score >= 30) return Colors.green;
+    if (score >= 20) return Colors.orange;
+    return Colors.red;
+  }
+
+  Widget _buildVitaminDCard() {
+    return CustomCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                "Niveau Vitamin D",
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              Text(
+                _vitaminDScore,
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: _getVitaminDColor(),
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: 12),
+          Container(
+            height: 200,
+            child: loadingVitaminD
+                ? Center(child: CircularProgressIndicator())
+                : vitaminDData.isEmpty
+                ? Center(
+                    child: Text(
+                      "Aucune donnée Vitamin D disponible",
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                  )
+                : VitaminDChart(data: vitaminDData),
+          ),
+          SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                "Historique sur ${vitaminDData.length} jours",
+                style: TextStyle(color: Colors.grey, fontSize: 12),
+              ),
+              IconButton(
+                icon: Icon(Icons.refresh),
+                onPressed: _loadVitaminDData,
+                iconSize: 20,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCaloriesCard() {
+    return CustomCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                "Calories Brûlées",
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              Container(
+                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.local_fire_department,
+                      size: 16,
+                      color: Colors.orange,
+                    ),
+                    SizedBox(width: 4),
+                    Text(
+                      '$_todayCalories cal',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.orange,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: 12),
+          Container(
+            height: 200,
+            child: loadingCalories
+                ? Center(child: CircularProgressIndicator())
+                : caloriesData.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.local_fire_department,
+                          size: 48,
+                          color: Colors.grey,
+                        ),
+                        SizedBox(height: 8),
+                        Text(
+                          "Aucune donnée calories",
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      ],
+                    ),
+                  )
+                : CaloriesChart(data: caloriesData),
+          ),
+          SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                "Historique sur ${caloriesData.length} jours",
+                style: TextStyle(color: Colors.grey, fontSize: 12),
+              ),
+              IconButton(
+                icon: Icon(Icons.refresh, size: 20),
+                onPressed: _loadCaloriesData,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _loadUserAvatarFromDatabase() async {
@@ -449,16 +970,12 @@ class _DashboardPageState extends State<DashboardPage> {
     }
 
     try {
-      // 1. Requête la table 'user_configurations' pour l'utilisateur actuel
       final response = await Supabase.instance.client
           .from('user_configurations')
-          .select(
-            'profile_image_url',
-          ) // Sélectionne uniquement la colonne de l'image
-          .eq('user_id', userId) // Filtre par l'ID de l'utilisateur
-          .single(); // N'attend qu'un seul résultat (le profil utilisateur)
+          .select('profile_image_url')
+          .eq('user_id', userId)
+          .single();
 
-      // 2. Vérifie et extrait l'URL
       final String? url = response['profile_image_url'] as String?;
 
       if (mounted) {
@@ -476,147 +993,18 @@ class _DashboardPageState extends State<DashboardPage> {
       }
     }
   }
-  // --- (Fonctions _predictStress, _predictCalories, getCurrentLocation, getWeather, _loadWeatherData, _mapWeatherCode inchangées) ---
 
-  Future<void> _predictCalories(String userId) async {
-    setState(() {
-      _loading = true;
-      _resultCalories = null;
-    });
-
-    try {
-      final supabase = Supabase.instance.client;
-
-      // 1️⃣ Extraction des données de configuration (inchangée)
-      final userConfigResponse = await supabase
-          .from('user_configurations')
-          .select()
-          .eq('user_id', userId)
-          .maybeSingle();
-
-      if (userConfigResponse == null) {
-        if (mounted) {
-          setState(() {
-            _resultCalories = "Erreur: Configuration utilisateur non trouvée.";
-            _loading = false;
-          });
-        }
-        return;
-      }
-
-      final int age = userConfigResponse['age'] ?? 0;
-      final double weight = (userConfigResponse['weightKg'] ?? 0).toDouble();
-      final double height = (userConfigResponse['heightCm'] ?? 0).toDouble();
-      final int gender = (userConfigResponse['gender'] == 'Homme'
-          ? 1
-          : userConfigResponse['gender'] == 'Femme'
-          ? 2
-          : 0);
-
-      // 2️⃣ Extraction des variables du formulaire (DOIT ÊTRE FAIT AVANT LA REQUÊTE)
-      final double duration = double.tryParse(_durationController.text) ?? 0.0;
-      final double bodyTemp = double.tryParse(_bodyTempController.text) ?? 0.0;
-
-      // --- CORRECTION DU BPM ---
-
-      // Calculer le timestamp de début : Maintenant moins la durée en minutes.
-      // La durée est en minutes, donc on la convertit en secondes
-      // Calculer l'heure de fin actuelle en UTC
-      final DateTime nowUtc = DateTime.now().toUtc(); // <-- Utilisez UTC
-
-      // Calculer le timestamp de début : Maintenant (UTC) moins la durée en minutes.
-      final DateTime startUtc = nowUtc.subtract(
-        Duration(minutes: duration.toInt()),
-      );
-      // Le timestamp dans Supabase est généralement au format ISO 8601 (String) ou epoch.
-      // Nous utiliserons le format String pour Supabase.
-      // Le filtre doit être une string ISO 8601 en UTC
-      final String timeFilter = startUtc.toIso8601String();
-      // 3️⃣ Récupérer les métriques BPM (heart rate) depuis user_metrics
-      final metricsData = await supabase
-          .from('user_metrics')
-          .select('bpm')
-          .eq('user_id', userId)
-          // 🚨 NOUVEAU FILTRE : Récupérer seulement les BPM enregistrés APRÈS timeFilter
-          .gte('ts', timeFilter)
-          .order('ts', ascending: false) // On conserve l'ordre
-          .limit(100); // Récupérer un nombre suffisant d'échantillons
-
-      // Vérification de la réponse et calcul de la moyenne
-      final List<int> bpmValues = (metricsData as List<dynamic>)
-          .map(
-            (e) => (e['bpm'] as int?) ?? 0,
-          ) // Convertir en int, gérer les nulls
-          .where((bpm) => bpm > 0) // Ignorer les valeurs nulles/zéros
-          .toList();
-
-      if (bpmValues.isEmpty) {
-        if (mounted) {
-          setState(() {
-            _resultCalories =
-                "Erreur: Aucune donnée cardiaque trouvée pour cette période.";
-            _loading = false;
-          });
-        }
-        return;
-      }
-
-      // Calculer la moyenne
-      final double heartRate =
-          bpmValues.reduce((a, b) => a + b) / bpmValues.length;
-      // --- FIN CORRECTION DU BPM ---
-
-      // 4️⃣ Appel à l'Edge Function (inchangé)
-      final predictionResponse = await supabase.functions.invoke(
-        'predict_calories',
-        body: {
-          'user_id': userId,
-          'Gender': gender,
-          'Age': age,
-          'Height': height,
-          'Weight': weight,
-          'Duration': duration,
-          'Heart_Rate': heartRate, // ✅ Maintenant la moyenne
-          'Body_Temp': bodyTemp,
-        },
-      );
-
-      // ... (Reste de la gestion de la réponse)
-      final predictionData = predictionResponse.data;
-      print("📩 Response from Edge Function: $predictionData");
-
-      final resultValue =
-          predictionData?['calories_burned']?.toString() ?? 'Unknown';
-
-      setState(() {
-        _resultCalories = "Calories brûlées estimées : $resultValue kcal";
-      });
-    } catch (e) {
-      setState(() {
-        _resultCalories = "Erreur critique de prédiction: $e";
-      });
-    } finally {
-      setState(() {
-        _loading = false;
-      });
-    }
-  }
-
-  // MODIFIER CETTE FONCTION DANS VOTRE CODE
   Future<Position?> getCurrentLocation() async {
     try {
-      // 💡 AJOUT DU TRY/CATCH DANS CETTE FONCTION 💡
       bool serviceEnabled;
       LocationPermission permission;
 
-      // Teste si les services de localisation sont activés
       serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
         print("DEBUG: Geolocator Service Désactivé.");
         return null;
       }
 
-      // Demande la permission
       permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
@@ -626,13 +1014,11 @@ class _DashboardPageState extends State<DashboardPage> {
         }
       }
 
-      // Obtient la position actuelle AVEC TIMEOUT
       return await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.low,
         timeLimit: const Duration(seconds: 10),
       );
     } catch (e, stacktrace) {
-      // 💡 Ce catch devrait afficher la VRAIE erreur si le plugin bloque 💡
       print('ERREUR NATALE DANS getCurrentLocation: $e');
       print('STACKTRACE DANS getCurrentLocation: $stacktrace');
       return null;
@@ -643,62 +1029,32 @@ class _DashboardPageState extends State<DashboardPage> {
     final lat = position.latitude;
     final lon = position.longitude;
 
-    // Construire l'URL de l'API
     final url = Uri.https('api.open-meteo.com', '/v1/forecast', {
       'latitude': lat.toString(),
       'longitude': lon.toString(),
       'current': 'temperature_2m,weather_code',
-      'forecast_hours': '1', // Juste pour l'actuel et une heure
+      'forecast_hours': '1',
       'timezone': 'auto',
     });
     print('URL Météo: $url');
     final response = await http.get(url);
 
     if (response.statusCode == 200) {
-      // Succès ! Décoder la réponse JSON
       return jsonDecode(response.body) as Map<String, dynamic>;
     } else {
-      // Échec de la requête
       print('Erreur API Open-Meteo: ${response.statusCode}');
       return null;
     }
   }
 
-  void displayWeather() async {
-    final position = await getCurrentLocation();
-    if (position == null) {
-      print("Impossible d'obtenir la localisation.");
-      return;
-    }
-
-    final weatherData = await getWeather(position);
-
-    if (weatherData != null) {
-      // Exemple d'extraction de la température actuelle
-      final currentTemperature = weatherData['current']['temperature_2m'];
-      final weatherCode = weatherData['current']['weather_code'];
-
-      print('Température actuelle: $currentTemperature °C');
-      print('Code Météo (à interpréter): $weatherCode');
-
-      // Mettre à jour l'interface utilisateur de votre smartwatch avec ces valeurs
-    }
-  }
-
-  // NOUVELLE FONCTION MODIFIÉE : _loadWeatherData
   void _loadWeatherData() async {
     print("DEBUG: 1. Début de _loadWeatherData");
 
     try {
-      // 💡 Le bloc TRY doit commencer ici 💡
-
-      // 1. Appel de la localisation
       final position = await getCurrentLocation();
 
       if (position == null) {
-        print(
-          "DEBUG: 2. Localisation est NULL (Problème de permission ou GPS)",
-        );
+        print("DEBUG: 2. Localisation est NULL");
         setState(() {
           _weatherDescription = 'Localisation désactivée';
           _weatherIcon = Icons.location_off;
@@ -708,13 +1064,11 @@ class _DashboardPageState extends State<DashboardPage> {
 
       print("DEBUG: 3. Localisation obtenue: Lat ${position.latitude}");
 
-      // 2. Appel de l'API Météo
       final weatherData = await getWeather(position);
 
       if (weatherData != null) {
         print("DEBUG: 4. Données météo reçues, mise à jour de l'UI.");
 
-        // On vérifie directement les types JSON pour être plus sûr
         final currentMap = weatherData['current'] as Map<String, dynamic>?;
 
         if (currentMap != null) {
@@ -731,26 +1085,19 @@ class _DashboardPageState extends State<DashboardPage> {
               _weatherIcon = icon;
             });
           } else {
-            print(
-              "DEBUG: 5a. Données 'temperature' ou 'code' manquantes dans le JSON.",
-            );
+            print("DEBUG: 5a. Données 'temperature' ou 'code' manquantes");
             setState(() {
               _weatherDescription = 'Données incomplètes';
               _weatherIcon = Icons.error_outline;
             });
           }
         } else {
-          print("DEBUG: 5b. La clé 'current' est absente ou non formatée.");
+          print("DEBUG: 5b. La clé 'current' est absente");
         }
       } else {
-        print(
-          "DEBUG: 5c. getWeather a retourné NULL (Problème API/Status code)",
-        );
-        // Si getWeather retourne NULL, l'état initial des variables sera conservé jusqu'au prochain setState.
-        // Ici, nous n'avons rien à faire de plus, car nous voulons voir les prints.
+        print("DEBUG: 5c. getWeather a retourné NULL");
       }
     } catch (e, stacktrace) {
-      // 💡 Le catch attrape les erreurs de Localisation, de HTTP ou de Parsing JSON 💡
       print('ERREUR FATALE DANS _loadWeatherData: $e');
       print('STACKTRACE: $stacktrace');
       setState(() {
@@ -760,7 +1107,6 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
-  // NOUVELLE FONCTION : Mapping des Codes WMO (très simplifiée)
   (String, IconData) _mapWeatherCode(int code) {
     if (code >= 0 && code <= 1) {
       return ('Ensoleillé', Icons.wb_sunny);
@@ -777,55 +1123,6 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   late final StreamSubscription<AuthState> _authSubscription;
-  @override
-  void initState() {
-    super.initState();
-    final service = DataSyncService(supabase: Supabase.instance.client);
-    startSimulatedData(service);
-    // 1. Charger les données qui ne dépendent pas du login actif (Météo, Avatar)
-    _loadWeatherData();
-    _loadUserAvatarFromDatabase();
-
-    // 2. Écouter les changements d'état d'authentification
-    // Ceci est la MEILLEURE PRATIQUE pour synchroniser l'UI avec l'état de la session.
-    _authSubscription = supabase.auth.onAuthStateChange.listen((data) {
-      final AuthChangeEvent event = data.event;
-
-      // Si l'événement est un LOGIN ou la RECUPERATION d'une session existante
-      if (event == AuthChangeEvent.signedIn ||
-          event == AuthChangeEvent.initialSession) {
-        print(
-          "AUTH CHANGE: User is Signed In/Initial Session Loaded. Démarrage des services.",
-        );
-
-        // Démarrer les services qui DÉPENDENT de l'ID utilisateur (stress, vit D)
-        _predictionService
-            .stopAutoPrediction(); // Arrêter l'ancien service au cas où
-        _loadStressPrediction();
-        _loadVitaminDScore();
-
-        _predictionService.startAutoPrediction((value) {
-          if (mounted) {
-            setState(() {
-              _stressLevel = value;
-            });
-          }
-        });
-        _stressNotificationService.startMonitoring();
-      } else if (event == AuthChangeEvent.signedOut) {
-        print("AUTH CHANGE: User Signed Out. Arrêt des services.");
-        _predictionService.stopAutoPrediction();
-        _stressNotificationService
-            .stopMonitoring(); // ✅ ARRÊTER LA SURVEILLANCE
-        if (mounted) {
-          setState(() {
-            _stressLevel = '--'; // Réinitialiser l'état
-            _vitaminDScore = '--';
-          });
-        }
-      }
-    });
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -854,8 +1151,6 @@ class _DashboardPageState extends State<DashboardPage> {
 
           switch (i) {
             case 0:
-              // Correction: Navigator.pushNamed dans onTap pour l'index actuel n'est pas nécessaire
-              // Navigator.pushNamed(context, AppRouter.dashboard);
               break;
             case 1:
               Navigator.pushNamed(context, AppRouter.activity);
@@ -912,29 +1207,23 @@ class _DashboardPageState extends State<DashboardPage> {
                 'Smartwatch Santé',
                 style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
               ),
-              // ... (dans _buildDashboardBody, à l'intérieur de la Row du HEADER)
               CircleAvatar(
-                // Si _userAvatarUrl est non-null, on utilise NetworkImage
                 backgroundImage: _userAvatarUrl != null
                     ? NetworkImage(_userAvatarUrl!) as ImageProvider<Object>?
-                    : null, // Sinon, pas d'image de fond
-                // Si NetworkImage est utilisé, le child (icône) n'est pas nécessaire
-                // On utilise un opérateur ternaire pour afficher l'icône seulement si l'URL est nulle
+                    : null,
                 backgroundColor: _userAvatarUrl != null
-                    ? Colors.grey[300] // Fond clair si image de profil chargée
+                    ? Colors.grey[300]
                     : Theme.of(context).primaryColor,
-
                 child: _userAvatarUrl == null
                     ? Icon(Icons.person, color: Colors.white)
-                    : null, // Pas d'enfant si l'image est chargée
+                    : null,
               ),
-              // ...
             ],
           ),
 
           SizedBox(height: 16),
 
-          // 🌿 SECTION HERO : Score de bien-être (inchangé)
+          // SECTION HERO : Score de bien-être
           CustomCard(
             child: Container(
               height: 200,
@@ -1002,7 +1291,6 @@ class _DashboardPageState extends State<DashboardPage> {
                         style: TextStyle(color: Colors.white70, fontSize: 16),
                       ),
                       SizedBox(height: 16),
-                      // Score visuel + barre de progression
                       Stack(
                         alignment: Alignment.center,
                         children: [
@@ -1035,8 +1323,18 @@ class _DashboardPageState extends State<DashboardPage> {
             ),
           ),
 
-          SizedBox(height: 24),
-          // Dans _buildDashboardBody, après la section "Score de bien-être"
+          SizedBox(height: 16),
+
+          // CARTE CALORIES - AJOUTÉE ICI
+          _buildCaloriesCard(),
+
+          SizedBox(height: 16),
+
+          // CARTE VITAMIN D
+          _buildVitaminDCard(),
+
+          SizedBox(height: 16),
+
           // TABLEAU DE BORD
           CustomCard(
             child: Column(
@@ -1052,42 +1350,59 @@ class _DashboardPageState extends State<DashboardPage> {
                   children: [
                     Expanded(
                       child: StatCard(
-                        icon: _weatherIcon, // Utilisation de l'icône d'état
+                        icon: _weatherIcon,
                         label: 'Météo Actuelle',
-                        value:
-                            _temperature, // Utilisation de la température d'état
-                        subValue:
-                            _weatherDescription, // Description dans le sous-texte
-                        onPressed: _loadWeatherData, // Bouton pour réactualiser
+                        value: _temperature,
+                        subValue: _weatherDescription,
+                        onPressed: _loadWeatherData,
                       ),
                     ),
                   ],
                 ),
                 SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: StatCard(
-                        icon: Icons
-                            .local_florist, // Icône plus pertinente pour la Vit D
-                        label: 'Vitamine D (Score)',
-                        // ✅ UTILISATION DE LA VARIABLE D'ÉTAT MISE À JOUR
-                        value: '$_vitaminDScore / 100',
-                        // ✅ On utilise la nouvelle fonction de rechargement comme action
-                        onPressed: _loadVitaminDScore,
-                      ),
-                    ),
-                    SizedBox(width: 10),
-                    // Espace vide ou autre carte ici
-                  ],
-                ),
 
                 Row(
                   children: [
                     Expanded(
                       child: ElevatedButton(
-                        onPressed: () => health.randomUpdate(),
-                        child: Text('Actualiser Santé (Local)'),
+                        onPressed: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (_) => BluetoothPage()),
+                          );
+                        },
+                        child: Text(
+                          "Lier La montre",
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => HealthMonitorScreen(),
+                            ),
+                          );
+                        },
+                        child: Text(
+                          "Data",
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -1098,7 +1413,7 @@ class _DashboardPageState extends State<DashboardPage> {
 
           SizedBox(height: 16),
 
-          // ANALYSE IA (stress, calories - inchangée)
+          // ANALYSE IA
           CustomCard(
             child: Column(
               children: [
@@ -1127,7 +1442,6 @@ class _DashboardPageState extends State<DashboardPage> {
                   style: TextStyle(fontSize: 16),
                 ),
 
-                // 🧩 FORMULAIRE DE SIMULATION stress detection
                 SizedBox(height: 16),
                 Form(
                   key: _formKey,
@@ -1150,96 +1464,8 @@ class _DashboardPageState extends State<DashboardPage> {
             ),
           ),
           SizedBox(height: 16),
-          CustomCard(
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                      Icons.lightbulb,
-                      color: Theme.of(context).primaryColor,
-                    ),
-                    SizedBox(width: 8),
-                    Text(
-                      'Analyse IA',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                  ],
-                ),
-                SizedBox(height: 12),
-                Icon(
-                  Icons.lightbulb,
-                  color: Theme.of(context).primaryColor,
-                  size: 48,
-                ),
-                SizedBox(height: 8),
-                Text(
-                  'Simulation prédiction du calories',
-                  style: TextStyle(fontSize: 16),
-                ),
 
-                // 🧩 FORMULAIRE DE SIMULATION calories calcul
-                SizedBox(height: 8),
-
-                Form(
-                  key: _formKeyCalories,
-                  child: Column(
-                    children: [
-                      _buildTextField(_durationController, 'Duration (min)'),
-                      _buildTextField(
-                        _bodyTempController,
-                        'Body Temperature (°C)',
-                      ),
-
-                      const SizedBox(height: 12),
-
-                      ElevatedButton(
-                        onPressed: _loading
-                            ? null
-                            : () async {
-                                final user =
-                                    Supabase.instance.client.auth.currentUser;
-                                if (user != null) {
-                                  await _predictCalories(
-                                    user.id,
-                                  ); // ✅ nouvelle fonction
-                                } else {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        "Aucun utilisateur connecté",
-                                      ),
-                                    ),
-                                  );
-                                }
-                              },
-                        child: _loading
-                            ? const CircularProgressIndicator(
-                                color: Colors.white,
-                              )
-                            : const Text("Prédire les calories brûlées"),
-                      ),
-
-                      const SizedBox(height: 16),
-
-                      if (_resultCalories != null)
-                        Text(
-                          _resultCalories!,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                            color: Colors.blueAccent,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          SizedBox(height: 16),
-
-          // GRAPHIQUE CARDIAQUE (inchangé)
+          // GRAPHIQUE CARDIAQUE
           CustomCard(
             child: Column(
               children: [
@@ -1257,10 +1483,7 @@ class _DashboardPageState extends State<DashboardPage> {
                   ],
                 ),
                 SizedBox(height: 8),
-                Container(
-                  height: 140,
-                  child: RealTimeChart(), // ← chart dynamique
-                ),
+                Container(height: 140, child: RealTimeChart()),
                 SizedBox(height: 8),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1280,28 +1503,9 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _buildTextField(TextEditingController controller, String label) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4.0),
-      child: TextFormField(
-        controller: controller,
-        decoration: InputDecoration(
-          labelText: label,
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-        ),
-        keyboardType: TextInputType.number,
-        validator: (value) =>
-            value == null || value.isEmpty ? 'Champ requis' : null,
-      ),
-    );
-  }
-
-  // Fonction désormais inutilisée dans ce fichier après les corrections
-  // void _onCalculateTap() async { /* ... */ }
-
   @override
   void dispose() {
-    _authSubscription.cancel(); // 👈 TRÈS IMPORTANT : Annuler l'écoute
+    _authSubscription.cancel();
     _predictionService.stopAutoPrediction();
     _genderController.dispose();
     _ageController.dispose();

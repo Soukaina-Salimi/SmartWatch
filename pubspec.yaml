@@ -51,6 +51,10 @@ dependencies:
   path_provider: ^2.1.2 
   json_annotation: ^4.8.1
   flutter_local_notifications: ^19.0.0
+  flutter_blue_plus: 1.23.0
+  permission_handler: ^11.0.0
+  intl: ^0.18.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

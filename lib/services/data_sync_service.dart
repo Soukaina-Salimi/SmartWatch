@@ -28,6 +28,7 @@ class DataSyncService {
         gyroX: data['gyroX'],
         gyroY: data['gyroY'],
         gyroZ: data['gyroZ'],
+        uvIndex: data['uv_index'], // 🔥 ajouté ici
       );
     });
   }
@@ -36,7 +37,7 @@ class DataSyncService {
     _timer?.cancel();
   }
 
-  /// Génère une mesure de test aléatoire
+  /// Génère une mesure de test aléatoire (simulation)
   Map<String, dynamic> generateTestData() {
     // Simule PPG / BPM
     int bpm = 60 + _rand.nextInt(40); // 60 à 100
@@ -52,6 +53,9 @@ class DataSyncService {
     double gyroY = (_rand.nextDouble() * 180) - 90;
     double gyroZ = (_rand.nextDouble() * 180) - 90;
 
+    // Simulation UV index : 0 à 11+
+    double uvIndex = (_rand.nextDouble() * 12); // 0 → 11
+
     return {
       'bpm': bpm,
       'ibi': ibi,
@@ -63,6 +67,7 @@ class DataSyncService {
       'gyroX': gyroX,
       'gyroY': gyroY,
       'gyroZ': gyroZ,
+      'uv_index': uvIndex, // 🔥 ajouté ici
     };
   }
 
@@ -77,6 +82,7 @@ class DataSyncService {
     required double gyroX,
     required double gyroY,
     required double gyroZ,
+    required double uvIndex, // 🔥 ajouté ici
   }) async {
     final session = supabase.auth.currentSession;
     if (session == null) {
@@ -99,6 +105,7 @@ class DataSyncService {
       'gyro_x': gyroX,
       'gyro_y': gyroY,
       'gyro_z': gyroZ,
+      'uv_index': uvIndex, // 🔥 ajouté ici pour enregistrement Supabase
     };
 
     try {
@@ -124,6 +131,4 @@ class DataSyncService {
       return null;
     }
   }
-
-  /// Envoie une seule mesure traitée à Supabase
 }
