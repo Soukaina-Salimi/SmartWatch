@@ -84,9 +84,6 @@ class _AuthGateState extends State<AuthGate> {
         // Pas de session → welcome
         Navigator.pushReplacementNamed(context, AppRouter.welcome);
       }
-
-      // Démarrer sync
-      widget.dataSyncService.startSendingTestData();
     });
   }
 
@@ -125,7 +122,6 @@ class _AuthCheckerState extends State<AuthChecker> {
     _redirect(supabase.auth.currentSession);
 
     // Démarre l'envoi des données test
-    widget.dataSyncService.startSendingTestData();
   }
 
   void _redirect(Session? session) {

@@ -34,7 +34,7 @@ class RealTimeChart extends StatefulWidget {
 }
 
 class _RealTimeChartState extends State<RealTimeChart> {
-  final List<FlSpot> bpmData = [];
+  final List<FlSpot> ibiData = []; // Changé de bpmData à ibiData
   int xValue = 0;
   StreamSubscription? _chartSubscription;
 
@@ -44,12 +44,12 @@ class _RealTimeChartState extends State<RealTimeChart> {
     _chartSubscription = chartStream.stream.listen((data) {
       if (mounted) {
         setState(() {
-          bpmData.add(
-            FlSpot(xValue.toDouble(), (data['bpm'] as int).toDouble()),
-          );
+          // Utiliser l'IBI au lieu du BPM
+          final ibiValue = (data['ibi'] as double?) ?? 0.0;
+          ibiData.add(FlSpot(xValue.toDouble(), ibiValue));
           xValue++;
-          if (bpmData.length > 50) {
-            bpmData.removeAt(0);
+          if (ibiData.length > 50) {
+            ibiData.removeAt(0);
           }
         });
       }
@@ -66,22 +66,31 @@ class _RealTimeChartState extends State<RealTimeChart> {
   Widget build(BuildContext context) {
     return LineChart(
       LineChartData(
-        minY: 50,
-        maxY: 120,
+        minY: 0.3, // IBI typique en secondes (300ms à 1200ms)
+        maxY: 1.5, // Plage adaptée pour l'IBI
+        titlesData: FlTitlesData(
+          leftTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              getTitlesWidget: (value, meta) {
+                return Text('${value.toStringAsFixed(1)}s');
+              },
+            ),
+          ),
+          bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        ),
         lineBarsData: [
-          LineChartBarData(spots: bpmData, isCurved: true, color: Colors.red),
+          LineChartBarData(
+            spots: ibiData,
+            isCurved: true,
+            color: Colors.green, // Changé la couleur pour différencier
+            barWidth: 2,
+            dotData: FlDotData(show: false),
+          ),
         ],
       ),
     );
   }
-}
-
-void startSimulatedData(DataSyncService service) {
-  Timer.periodic(Duration(seconds: 5), (_) async {
-    final data = service.generateTestData();
-    chartStream.add(data);
-    print("Nouvelle donnée simulée : $data");
-  });
 }
 
 class CaloriesService {
@@ -360,6 +369,72 @@ class VitaminDChart extends StatelessWidget {
 
 final supabase = Supabase.instance.client;
 
+class DataUploadService {
+  final supabase = Supabase.instance.client;
+
+  Future<bool> uploadHealthData(Map<String, dynamic> healthData) async {
+    try {
+      final user = supabase.auth.currentUser;
+      if (user == null) {
+        print("❌ Utilisateur non connecté");
+        return false;
+      }
+
+      // Convertir et valider les données
+      final Map<String, dynamic> dataToInsert = {
+        'user_id': user.id,
+        'ts': DateTime.now().toIso8601String(),
+        'bpm': _safeInt(healthData['bpm']),
+        'accel_x': _safeDouble(healthData['accel_x']),
+        'accel_y': _safeDouble(healthData['accel_y']),
+        'accel_z': _safeDouble(healthData['accel_z']),
+        'gyro_x': _safeDouble(healthData['gyro_x']),
+        'gyro_y': _safeDouble(healthData['gyro_y']),
+        'gyro_z': _safeDouble(healthData['gyro_z']),
+        'skin_temp': _safeDouble(healthData['skin_temp']),
+        'uv_index': _safeInt(healthData['uv_index']),
+        'ibi': _safeDouble(healthData['ibi']),
+        'quality': healthData['signal_quality']?.toString() ?? 'unknown',
+        'motion': null,
+      };
+
+      print("📤 Envoi des données à Supabase: ${jsonEncode(dataToInsert)}");
+
+      final response = await supabase.from('user_metrics').insert(dataToInsert);
+
+      if (response.error != null) {
+        print("❌ Erreur Supabase: ${response.error!.message}");
+        print("❌ Détails: ${response.error!.details}");
+        print("❌ Hint: ${response.error!.hint}");
+        return false;
+      }
+
+      print("✅ Données envoyées avec succès à Supabase");
+      return true;
+    } catch (e) {
+      print("❌ Erreur lors de l'envoi des données: $e");
+      return false;
+    }
+  }
+
+  // Méthodes helper pour la conversion sécurisée
+  int _safeInt(dynamic value) {
+    if (value == null) return 0;
+    if (value is int) return value;
+    if (value is double) return value.round();
+    if (value is String) return int.tryParse(value) ?? 0;
+    return 0;
+  }
+
+  double _safeDouble(dynamic value) {
+    if (value == null) return 0.0;
+    if (value is double) return value;
+    if (value is int) return value.toDouble();
+    if (value is String) return double.tryParse(value) ?? 0.0;
+    return 0.0;
+  }
+}
+
 int calculateSteps(List<UserMetric> metrics) {
   int steps = 0;
   for (var m in metrics) {
@@ -578,17 +653,130 @@ class StressNotificationService {
 }
 
 class DashboardPage extends StatefulWidget {
-  const DashboardPage({super.key});
+  static final GlobalKey<_DashboardPageState> globalKey =
+      GlobalKey<_DashboardPageState>();
+
+  DashboardPage({Key? key}) : super(key: globalKey); // ← très important
 
   @override
   _DashboardPageState createState() => _DashboardPageState();
 }
 
 class _DashboardPageState extends State<DashboardPage> {
+  // Tes champs
+  String ppgSignal = "";
+  String ibi = "";
+  String signalQuality = "";
+  String accelX = "";
+  String accelY = "";
+  String accelZ = "";
+  String gyroX = "";
+  String gyroY = "";
+  String gyroZ = "";
+  String skinTemp = "";
+  String ambientTemp = "";
+  String uvIndex = "";
+  String timestamp = "";
+  late DataUploadService _uploadService;
   // Variables pour Vitamin D
   String _vitaminDScore = '--';
   List<Map<String, dynamic>> vitaminDData = [];
   bool loadingVitaminD = false;
+
+  void updateDataFields(Map<String, dynamic> data) {
+    setState(() {
+      ppgSignal = data['ppg']?['raw_signal']?.toString() ?? "";
+      ibi = data['ppg']?['ibi']?.toString() ?? "";
+      signalQuality = data['ppg']?['signal_quality']?.toString() ?? "";
+
+      accelX = data['movement']?['accel_x']?.toString() ?? "";
+      accelY = data['movement']?['accel_y']?.toString() ?? "";
+      accelZ = data['movement']?['accel_z']?.toString() ?? "";
+
+      gyroX = data['movement']?['gyro_x']?.toString() ?? "";
+      gyroY = data['movement']?['gyro_y']?.toString() ?? "";
+      gyroZ = data['movement']?['gyro_z']?.toString() ?? "";
+
+      skinTemp = data['temperature']?['skin_temp']?.toString() ?? "";
+      ambientTemp = data['temperature']?['ambient_temp']?.toString() ?? "";
+
+      uvIndex = data['uv']?['uv_index']?.toString() ?? "";
+
+      timestamp = data['ppg']?['timestamp']?.toString() ?? "";
+    });
+
+    // Envoyer automatiquement les données à Supabase
+    _uploadDataToSupabase(data);
+  }
+
+  Future<void> _uploadDataToSupabase(Map<String, dynamic> data) async {
+    try {
+      print("🔄 Réception données: ${jsonEncode(data)}");
+
+      // Extraire les valeurs avec des fallbacks sécurisés
+      final ppgData = data['ppg'] ?? {};
+      final movementData = data['movement'] ?? {};
+      final temperatureData = data['temperature'] ?? {};
+      final uvData = data['uv'] ?? {};
+
+      final healthData = {
+        'bpm': _extractInt(ppgData['bpm']),
+        'accel_x': _extractDouble(movementData['accel_x']),
+        'accel_y': _extractDouble(movementData['accel_y']),
+        'accel_z': _extractDouble(movementData['accel_z']),
+        'gyro_x': _extractDouble(movementData['gyro_x']),
+        'gyro_y': _extractDouble(movementData['gyro_y']),
+        'gyro_z': _extractDouble(movementData['gyro_z']),
+        'skin_temp': _extractDouble(temperatureData['skin_temp']),
+        'uv_index': _extractInt(uvData['uv_index']),
+        'ibi': _extractDouble(ppgData['ibi']),
+        'quality': ppgData['signal_quality']?.toString() ?? 'unknown',
+      };
+
+      print("📦 Données préparées: $healthData");
+
+      final success = await _uploadService.uploadHealthData(healthData);
+
+      if (success) {
+        print("✅ Données envoyées à Supabase avec succès");
+
+        // Mettre à jour le graphique
+        final ibiValue =
+            double.tryParse(data['ppg']?['ibi']?.toString() ?? '0.8') ?? 0.8;
+        chartStream.add({
+          'ibi': ibiValue, // Envoyer l'IBI au lieu du BPM
+          'timestamp': DateTime.now(),
+        });
+      }
+    } catch (e) {
+      print("❌ Erreur lors du traitement des données: $e");
+    }
+  }
+
+  // Helpers pour l'extraction sécurisée
+  int _extractInt(dynamic value) {
+    if (value == null) return 0;
+    if (value is int) return value;
+    if (value is double) return value.round();
+    if (value is String) {
+      // Nettoyer la chaîne si nécessaire
+      final cleaned = value.replaceAll(RegExp(r'[^0-9.-]'), '');
+      return int.tryParse(cleaned) ?? 0;
+    }
+    return 0;
+  }
+
+  double _extractDouble(dynamic value) {
+    if (value == null) return 0.0;
+    if (value is double) return value;
+    if (value is int) return value.toDouble();
+    if (value is String) {
+      // Nettoyer la chaîne si nécessaire
+      final cleaned = value.replaceAll(RegExp(r'[^0-9.-]'), '');
+      return double.tryParse(cleaned) ?? 0.0;
+    }
+    return 0.0;
+  }
 
   // Variables pour Calories
   List<Map<String, dynamic>> caloriesData = [];
@@ -633,9 +821,7 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   void initState() {
     super.initState();
-    final service = DataSyncService(supabase: Supabase.instance.client);
-    startSimulatedData(service);
-
+    _uploadService = DataUploadService(); // Ajouter cette ligne
     _loadWeatherData();
     _loadUserAvatarFromDatabase();
     _loadVitaminDData();
@@ -1182,6 +1368,13 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  Widget dataTile(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Text("$label : $value", style: TextStyle(fontSize: 18)),
+    );
+  }
+
   Widget _buildDashboardBody(BuildContext context) {
     final health = Provider.of<HealthProvider>(context);
     final wellbeingScore =
@@ -1496,6 +1689,28 @@ class _DashboardPageState extends State<DashboardPage> {
                   ],
                 ),
               ],
+            ),
+          ),
+          CustomCard(
+            child: SizedBox(
+              height: 300, // adjust as needed
+              child: ListView(
+                children: [
+                  dataTile("PPG Signal", ppgSignal),
+                  dataTile("IBI", ibi),
+                  dataTile("Signal Quality", signalQuality),
+                  dataTile("Accel X", accelX),
+                  dataTile("Accel Y", accelY),
+                  dataTile("Accel Z", accelZ),
+                  dataTile("Gyro X", gyroX),
+                  dataTile("Gyro Y", gyroY),
+                  dataTile("Gyro Z", gyroZ),
+                  dataTile("Skin Temp", skinTemp),
+                  dataTile("Ambient Temp", ambientTemp),
+                  dataTile("UV Index", uvIndex),
+                  dataTile("Timestamp", timestamp),
+                ],
+              ),
             ),
           ),
         ],

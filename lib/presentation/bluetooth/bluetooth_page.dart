@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:smartwatch_v2/pages/health/HealthMonitorScreen.dart';
+import 'package:smartwatch_v2/pages/dashboard/dashboard_page.dart';
+import 'package:smartwatch_v2/services/data_sync_service.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class BluetoothPage extends StatefulWidget {
   const BluetoothPage({Key? key}) : super(key: key);
@@ -56,6 +58,8 @@ class _BluetoothPageState extends State<BluetoothPage> {
   // -------------------------------
   // 🔹 Connexion à un appareil BLE
   // -------------------------------
+  final dataSyncService = DataSyncService(supabase: Supabase.instance.client);
+
   Future<void> connectToDevice(BluetoothDevice device) async {
     try {
       await device.connect(autoConnect: false);
@@ -64,20 +68,17 @@ class _BluetoothPageState extends State<BluetoothPage> {
         context,
       ).showSnackBar(SnackBar(content: Text("Connecté à ${device.name}")));
 
-      // Découvrir les services BLE
+      // Découvrir services
       List<BluetoothService> services = await device.discoverServices();
 
-      // UUID TX de l'ESP32 (notify)
-      final String txUUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
-
+      const String txUUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
       BluetoothCharacteristic? txCharacteristic;
 
-      // Recherche de la characteristic TX
-      for (var service in services) {
-        for (var char in service.characteristics) {
-          if (char.uuid.toString().toUpperCase() == txUUID) {
-            txCharacteristic = char;
-            break;
+      // Trouver TX
+      for (var s in services) {
+        for (var c in s.characteristics) {
+          if (c.uuid.toString().toUpperCase() == txUUID) {
+            txCharacteristic = c;
           }
         }
       }
@@ -89,32 +90,31 @@ class _BluetoothPageState extends State<BluetoothPage> {
         return;
       }
 
-      // Activer les notifications
+      // Activer notifications
       await txCharacteristic.setNotifyValue(true);
 
-      // 🔥 NAVIGATION vers l’écran HealthMonitor
+      // 👉 OUVRIR la page dashboard AVANT d’écouter
       Navigator.push(
         context,
-        MaterialPageRoute(builder: (_) => HealthMonitorScreen()),
+        MaterialPageRoute(builder: (_) => DashboardPage()),
       );
 
-      // 🔥 STREAM : chaque notification JSON → parse → update UI
-      txCharacteristic.value.listen((value) {
+      // 👉 STREAM BLE → JSON → UI
+      txCharacteristic.value.listen((bytes) {
         try {
-          String jsonString = utf8.decode(value);
+          String jsonString = utf8.decode(bytes);
           Map<String, dynamic> data = jsonDecode(jsonString);
 
           print("📥 Données reçues : $data");
 
-          // 👉 Rappelle l’écran actif et met à jour ses champs
-          HealthMonitorScreenState? state =
-              HealthMonitorScreen.globalKey.currentState;
+          // Accès à l'écran
+          final state = DashboardPage.globalKey.currentState;
 
           if (state != null) {
             state.updateDataFields(data);
           }
         } catch (e) {
-          print("Erreur JSON: $e");
+          print("❌ Erreur JSON: $e");
         }
       });
     } catch (e) {
@@ -165,26 +165,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
                       await FlutterBluePlus.stopScan();
                       await Future.delayed(const Duration(milliseconds: 300));
 
-                      if (device.state != BluetoothDeviceState.connected) {
-                        try {
-                          await device
-                              .connect(autoConnect: false)
-                              .timeout(const Duration(seconds: 25));
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text("Connecté à $displayName")),
-                          );
-                        } catch (e) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text("Erreur de connexion : $e")),
-                          );
-                        }
-                      } else {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text("$displayName est déjà connecté"),
-                          ),
-                        );
-                      }
+                      await connectToDevice(device);
                     },
                   ),
                 );

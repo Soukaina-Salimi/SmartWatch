@@ -50,6 +50,13 @@ class HealthMonitorScreenState extends State<HealthMonitorScreen> {
     });
   }
 
+  Widget dataTile(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Text("$label : $value", style: TextStyle(fontSize: 18)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -58,19 +65,19 @@ class HealthMonitorScreenState extends State<HealthMonitorScreen> {
         padding: const EdgeInsets.all(16),
         child: ListView(
           children: [
-            Text("PPG Signal: $ppgSignal"),
-            Text("IBI: $ibi"),
-            Text("Signal Quality: $signalQuality"),
-            Text("Accel X: $accelX"),
-            Text("Accel Y: $accelY"),
-            Text("Accel Z: $accelZ"),
-            Text("Gyro X: $gyroX"),
-            Text("Gyro Y: $gyroY"),
-            Text("Gyro Z: $gyroZ"),
-            Text("Skin Temp: $skinTemp"),
-            Text("Ambient Temp: $ambientTemp"),
-            Text("UV Index: $uvIndex"),
-            Text("Timestamp: $timestamp"),
+            dataTile("PPG Signal", ppgSignal),
+            dataTile("IBI", ibi),
+            dataTile("Signal Quality", signalQuality),
+            dataTile("Accel X", accelX),
+            dataTile("Accel Y", accelY),
+            dataTile("Accel Z", accelZ),
+            dataTile("Gyro X", gyroX),
+            dataTile("Gyro Y", gyroY),
+            dataTile("Gyro Z", gyroZ),
+            dataTile("Skin Temp", skinTemp),
+            dataTile("Ambient Temp", ambientTemp),
+            dataTile("UV Index", uvIndex),
+            dataTile("Timestamp", timestamp),
           ],
         ),
       ),
