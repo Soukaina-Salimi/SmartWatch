@@ -59,7 +59,6 @@ class _BluetoothPageState extends State<BluetoothPage> {
   // 🔹 Connexion à un appareil BLE
   // -------------------------------
   final dataSyncService = DataSyncService(supabase: Supabase.instance.client);
-
   Future<void> connectToDevice(BluetoothDevice device) async {
     try {
       await device.connect(autoConnect: false);
@@ -71,15 +70,18 @@ class _BluetoothPageState extends State<BluetoothPage> {
       // Découvrir services
       List<BluetoothService> services = await device.discoverServices();
 
-      const String txUUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
-      BluetoothCharacteristic? txCharacteristic;
+      const String txUUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"; // notify
+      const String rxUUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"; // write
 
-      // Trouver TX
+      BluetoothCharacteristic? txCharacteristic;
+      BluetoothCharacteristic? rxCharacteristic;
+
+      // Trouver TX et RX
       for (var s in services) {
         for (var c in s.characteristics) {
-          if (c.uuid.toString().toUpperCase() == txUUID) {
-            txCharacteristic = c;
-          }
+          final uuid = c.uuid.toString().toUpperCase();
+          if (uuid == txUUID) txCharacteristic = c;
+          if (uuid == rxUUID) rxCharacteristic = c;
         }
       }
 
@@ -90,16 +92,39 @@ class _BluetoothPageState extends State<BluetoothPage> {
         return;
       }
 
-      // Activer notifications
+      if (rxCharacteristic == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("❌ RX Characteristic non trouvée")),
+        );
+        return;
+      }
+
+      // Activer notifications TX
       await txCharacteristic.setNotifyValue(true);
 
-      // 👉 OUVRIR la page dashboard AVANT d’écouter
+      // ---------------------------------------------------------
+      // 🔥 ENVOYER TIMESTAMP TOUTES LES 1 MINUTE
+      // ---------------------------------------------------------
+      Timer.periodic(Duration(minutes: 1), (timer) async {
+        final timestamp = DateTime.now().toString().substring(0, 16);
+        final message = "TS:$timestamp";
+
+        try {
+          await rxCharacteristic?.write(message.codeUnits);
+          print("📤 Sent timestamp: $message");
+        } catch (e) {
+          print("❌ Error sending timestamp: $e");
+        }
+      });
+      // ---------------------------------------------------------
+
+      // Ouvrir dashboard AVANT d’écouter
       Navigator.push(
         context,
         MaterialPageRoute(builder: (_) => DashboardPage()),
       );
 
-      // 👉 STREAM BLE → JSON → UI
+      // STREAM JSON depuis ESP32
       txCharacteristic.value.listen((bytes) {
         try {
           String jsonString = utf8.decode(bytes);
@@ -107,12 +132,8 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
           print("📥 Données reçues : $data");
 
-          // Accès à l'écran
           final state = DashboardPage.globalKey.currentState;
-
-          if (state != null) {
-            state.updateDataFields(data);
-          }
+          state?.updateDataFields(data);
         } catch (e) {
           print("❌ Erreur JSON: $e");
         }

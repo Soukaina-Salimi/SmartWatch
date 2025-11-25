@@ -14,14 +14,14 @@ class VitaminDEstimatorService {
       print("🔍 Vérification user_conf pour: $userId");
 
       final existing = await supabase
-          .from('user_conf')
+          .from('user_configurations')
           .select()
           .eq('user_id', userId);
 
       if (existing.isEmpty) {
         print("➕ Création user_conf avec valeurs par défaut");
 
-        await supabase.from('user_conf').upsert({
+        await supabase.from('user_configurations').upsert({
           'user_id': userId,
           'skin_type': 3,
           'age': 30,
@@ -92,7 +92,7 @@ class VitaminDEstimatorService {
     }
   }
 
-  /// 🔹 Appeler l'Edge Function - VERSION CORRIGÉE
+  /// 🔹 Appeler l'Edge Function - VERSION CORRIGÉER
   Future<Map<String, dynamic>> estimateVitaminD(String userId) async {
     try {
       print("🟡 Début estimateVitaminD pour: $userId");

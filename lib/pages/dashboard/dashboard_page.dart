@@ -100,9 +100,11 @@ class CaloriesService {
     try {
       final user = supabase.auth.currentUser;
       if (user == null) {
-        print("Utilisateur non connecté");
+        print("❌ Utilisateur non connecté pour calories");
         return [];
       }
+
+      print("🔄 Chargement calories pour user: ${user.id}");
 
       final response = await supabase
           .from('calories_predictions')
@@ -111,9 +113,15 @@ class CaloriesService {
           .order('created_at', ascending: true)
           .limit(30);
 
+      print("✅ Données calories reçues: ${response.length} entrées");
+
+      if (response.isEmpty) {
+        print("📭 Table calories_predictions vide pour cet utilisateur");
+      }
+
       return response;
     } catch (e) {
-      print("Erreur dans getCaloriesData: $e");
+      print("❌ Erreur getCaloriesData: $e");
       return [];
     }
   }
@@ -394,7 +402,6 @@ class DataUploadService {
         'skin_temp': _safeDouble(healthData['skin_temp']),
         'uv_index': _safeInt(healthData['uv_index']),
         'ibi': _safeDouble(healthData['ibi']),
-        'quality': healthData['signal_quality']?.toString() ?? 'unknown',
         'motion': null,
       };
 
@@ -666,7 +673,6 @@ class _DashboardPageState extends State<DashboardPage> {
   // Tes champs
   String ppgSignal = "";
   String ibi = "";
-  String signalQuality = "";
   String accelX = "";
   String accelY = "";
   String accelZ = "";
@@ -687,7 +693,6 @@ class _DashboardPageState extends State<DashboardPage> {
     setState(() {
       ppgSignal = data['ppg']?['raw_signal']?.toString() ?? "";
       ibi = data['ppg']?['ibi']?.toString() ?? "";
-      signalQuality = data['ppg']?['signal_quality']?.toString() ?? "";
 
       accelX = data['movement']?['accel_x']?.toString() ?? "";
       accelY = data['movement']?['accel_y']?.toString() ?? "";
@@ -730,7 +735,6 @@ class _DashboardPageState extends State<DashboardPage> {
         'skin_temp': _extractDouble(temperatureData['skin_temp']),
         'uv_index': _extractInt(uvData['uv_index']),
         'ibi': _extractDouble(ppgData['ibi']),
-        'quality': ppgData['signal_quality']?.toString() ?? 'unknown',
       };
 
       print("📦 Données préparées: $healthData");
@@ -1667,7 +1671,7 @@ class _DashboardPageState extends State<DashboardPage> {
                   children: [
                     Text('Rythme cardiaque', style: TextStyle(fontSize: 18)),
                     Text(
-                      '${health.data.heartBpm} BPM',
+                      '${health.data.heartBpm} IBI',
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 22,
@@ -1698,7 +1702,6 @@ class _DashboardPageState extends State<DashboardPage> {
                 children: [
                   dataTile("PPG Signal", ppgSignal),
                   dataTile("IBI", ibi),
-                  dataTile("Signal Quality", signalQuality),
                   dataTile("Accel X", accelX),
                   dataTile("Accel Y", accelY),
                   dataTile("Accel Z", accelZ),
